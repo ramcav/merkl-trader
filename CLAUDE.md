@@ -65,6 +65,20 @@ The box that runs merkl-api also runs this, under a compose profile that a
 plain `docker compose up -d` never starts — see merkl-api's
 `docker-compose.prod.yml` and its README for `--profile trader`.
 
+## The model provider
+
+`[model].provider` (`config.py`, `MODEL_PROVIDERS`) is `"anthropic"` (the
+default, so an older config is unchanged) or `"openai"`. `decide.py` keeps
+the Anthropic loop exactly as it was and adds a second one, `_decide_openai`,
+behind the same four `TOOLS`, converted to OpenAI's function-calling shape
+(`OPENAI_TOOLS`) rather than duplicated. `trader.py`'s `_model_client()`
+picks `AnthropicModel` or `OpenAIModel` from the same setting; `decide()`
+branches on the `provider` string, not on that object's type, so a test can
+hand either loop a plain `ModelPort` fake. An OpenAI tool call whose
+arguments are not valid JSON, or a model call that raises (bad key, no
+network), ends the cycle as a hold with a note — never a proposal built from
+blanks, never a traceback the caller has to handle.
+
 ## Guidelines
 
 - This repo imports `merkl.*` from the installed `merkl-sdk` package only —

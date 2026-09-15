@@ -1,10 +1,14 @@
 # The reference trading agent as a container: python:3.12-slim, this package
-# and its dependencies (merkl-sdk[xrpl], anthropic), nothing else.
+# and its dependencies (merkl-sdk[xrpl], anthropic, openai), nothing else.
 #
 #   docker run --rm \
 #     -v "$PWD/merkl-agent:/agent:ro" -v merkl-trader:/var/lib/merkl-trader \
 #     -e ANTHROPIC_API_KEY=sk-ant-... \
 #     ghcr.io/ramcav/merkl-trader:0.1.0
+#
+# Set OPENAI_API_KEY instead of ANTHROPIC_API_KEY when trader.toml's
+# [model].provider = "openai" — whichever one [model].api_key_env names.
+# Both SDKs are installed either way; only the one the config picks is used.
 #
 # /agent is read-only: the trader reads its five files there (trader.toml,
 # agent-ed25519.pem, wallet.json, relay-token.txt, notary-api-key.txt — the

@@ -23,7 +23,14 @@ Handing it the rulebook would make the refusals disappear and the story with
 them.
 
 The Anthropic SDK is imported lazily, inside the one class that needs it, so the
-rest of this package — and its tests — run without it installed.
+rest of this package — and its tests — run without it installed. The OpenAI
+path added alongside it (``[model].provider = "openai"``, `config.py`) is the
+same four tools, the same system prompt, and the same one-proposal-per-cycle
+rule, over OpenAI's chat completions and its own tool-calling shape — a
+``role: "tool"`` message per call, keyed by ``tool_call_id``, rather than
+Anthropic's ``tool_result`` content blocks. ``decide()`` still ends a turn the
+instant a proposal is made; a tool call whose arguments are not valid JSON is
+a hold, with a note, never a proposal built from blanks.
 """
 
 from __future__ import annotations
@@ -289,6 +296,44 @@ class AnthropicModel:
         return await self._client.messages.create(**request)
 
 
+class OpenAIModel:
+    """A tool-calling OpenAI chat model, over the official SDK.
+
+    Imported here and nowhere else, same as :class:`AnthropicModel`. Which one
+    ``build()`` constructs is ``[model].provider`` (``config.py``); ``decide()``
+    branches on the same setting, not on the type of this object.
+    """
+
+    def __init__(self, api_key: str) -> None:
+        from openai import AsyncOpenAI  # noqa: PLC0415 - optional dependency
+
+        self._client = AsyncOpenAI(api_key=api_key)
+
+    async def create(self, **request: Any) -> Any:
+        return await self._client.chat.completions.create(**request)
+
+
+def _as_openai_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """``TOOLS``' Anthropic shape (``input_schema``), in OpenAI's (``parameters``).
+
+    One list of names, descriptions and JSON schemas, converted rather than
+    duplicated — the two providers cannot drift apart from each other by
+    editing only one of them.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+            "strict": bool(tool.get("strict", True)),
+        },
+    }
+
+
+OPENAI_TOOLS: Final[list[dict[str, Any]]] = [_as_openai_tool(tool) for tool in TOOLS]
+
+
 # --------------------------------------------------------------------------- #
 
 
@@ -300,12 +345,26 @@ async def decide(
     situation: JSONObject,
     market: Callable[[], Awaitable[JSONValue]],
     receipts: Callable[[int], Awaitable[JSONValue]],
+    provider: str = "anthropic",
 ) -> Decision:
     """Run one cycle's conversation and come back with at most one proposal.
 
     The loop stops the instant a proposal is made — no further request is sent,
     so the one-action cap costs nothing to enforce and cannot be talked out of.
+
+    ``provider`` picks the wire format, not the ``model`` object's type: a
+    fake standing in for either provider in a test looks like a plain
+    ``ModelPort``, not like :class:`AnthropicModel` or :class:`OpenAIModel`.
     """
+    if provider == "openai":
+        return await _decide_openai(
+            model=model,
+            model_name=model_name,
+            max_tokens=max_tokens,
+            situation=situation,
+            market=market,
+            receipts=receipts,
+        )
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": json.dumps(situation, indent=2, sort_keys=True)}
     ]
@@ -347,6 +406,71 @@ async def decide(
     )
 
 
+async def _decide_openai(
+    *,
+    model: ModelPort,
+    model_name: str,
+    max_tokens: int,
+    situation: JSONObject,
+    market: Callable[[], Awaitable[JSONValue]],
+    receipts: Callable[[int], Awaitable[JSONValue]],
+) -> Decision:
+    """``decide()``'s loop, over OpenAI's chat completions.
+
+    Same tools, same system prompt, same one-proposal-per-cycle rule as the
+    Anthropic path above; only the wire shape differs. A call that fails —
+    a bad key, no network, the provider down — ends the cycle as a hold with
+    a note, the same as a turn where nothing was proposed, rather than an
+    exception the caller was never asked to handle.
+    """
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": json.dumps(situation, indent=2, sort_keys=True)},
+    ]
+    usage = Usage()
+    for _ in range(MAX_TURNS):
+        try:
+            response = await model.create(
+                model=model_name,
+                max_completion_tokens=max_tokens,
+                tools=OPENAI_TOOLS,
+                tool_choice="auto",
+                messages=messages,
+            )
+        except Exception as exc:  # noqa: BLE001 - any transport/API failure is a hold, not a crash
+            return Decision(
+                kind="hold", reasoning="", usage=usage, note=f"the model call failed: {exc}"
+            )
+
+        usage = _add_openai(usage, response)
+        message = _openai_message(response)
+        calls = _openai_tool_calls(message)
+        proposal = _openai_proposal(calls, usage)
+        if proposal is not None:
+            return proposal
+        if not calls:
+            return Decision(
+                kind="hold", reasoning=str(getattr(message, "content", "") or ""), usage=usage
+            )
+
+        messages.append(_openai_assistant_message(message))
+        for call in calls:
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(getattr(call, "id", "")),
+                    "content": await _run_openai(call, market=market, receipts=receipts),
+                }
+            )
+
+    return Decision(
+        kind="hold",
+        reasoning="",
+        usage=usage,
+        note=f"the model was still reading after {MAX_TURNS} turns; nothing was proposed",
+    )
+
+
 # -- the tools, on this side ------------------------------------------------ #
 
 
@@ -373,6 +497,74 @@ def _proposal(calls: list[Any], usage: Usage) -> Decision | None:
         if name not in ("propose_swap", "propose_payment"):
             continue
         arguments = _arguments(call)
+        extra = len(calls) - index - 1
+        note = (
+            f"{extra} further tool call(s) in the same turn were not run: one action per cycle"
+            if extra
+            else ""
+        )
+        reasoning = str(arguments.get("reasoning", ""))
+        if name == "propose_swap":
+            return Decision(
+                kind="swap",
+                reasoning=reasoning,
+                usage=usage,
+                sell_asset=str(arguments.get("sell_asset", "")),
+                sell_max_amount=str(arguments.get("sell_max_amount", "")),
+                buy_asset=str(arguments.get("buy_asset", "")),
+                buy_amount=str(arguments.get("buy_amount", "")),
+                note=note,
+            )
+        return Decision(
+            kind="payment",
+            reasoning=reasoning,
+            usage=usage,
+            destination=str(arguments.get("destination", "")),
+            amount=str(arguments.get("amount", "")),
+            asset=str(arguments.get("asset", "")),
+            note=note,
+        )
+    return None
+
+
+async def _run_openai(
+    call: Any,
+    *,
+    market: Callable[[], Awaitable[JSONValue]],
+    receipts: Callable[[int], Awaitable[JSONValue]],
+) -> str:
+    name = _openai_name(call)
+    arguments = _openai_arguments(call)
+    if name == "get_market":
+        return json.dumps(await market(), indent=2, sort_keys=True)
+    if name == "read_receipts":
+        limit = arguments.get("limit", 5)
+        return json.dumps(await receipts(_bounded(limit)), indent=2, sort_keys=True, default=str)
+    return json.dumps({"error": f"there is no tool called {name!r}"})
+
+
+def _openai_proposal(calls: list[Any], usage: Usage) -> Decision | None:
+    """The first action call in the turn, if there is one and it parses.
+
+    OpenAI hands tool call arguments back as a JSON *string*, not an object,
+    so a malformed one is a real possibility here in a way it structurally
+    is not on the Anthropic side. It is never turned into a proposal built
+    from blank fields: a ``propose_swap`` or ``propose_payment`` call whose
+    arguments do not parse ends the cycle as a hold, with a note, exactly as
+    if nothing had been proposed.
+    """
+    for index, call in enumerate(calls):
+        name = _openai_name(call)
+        if name not in ("propose_swap", "propose_payment"):
+            continue
+        arguments = _openai_parsed_arguments(call)
+        if arguments is None:
+            return Decision(
+                kind="hold",
+                reasoning="",
+                usage=usage,
+                note=f"the model's {name} call was not valid JSON; treated as a hold",
+            )
         extra = len(calls) - index - 1
         note = (
             f"{extra} further tool call(s) in the same turn were not run: one action per cycle"
@@ -446,6 +638,64 @@ def _count(reported: Any, field: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+# -- OpenAI shapes ------------------------------------------------------------ #
+
+
+def _openai_message(response: Any) -> Any:
+    choices = list(getattr(response, "choices", []) or [])
+    return choices[0].message if choices else None
+
+
+def _openai_tool_calls(message: Any) -> list[Any]:
+    calls = getattr(message, "tool_calls", None) if message is not None else None
+    return list(calls) if calls else []
+
+
+def _openai_name(call: Any) -> str:
+    function = getattr(call, "function", None)
+    return str(getattr(function, "name", "")) if function is not None else ""
+
+
+def _openai_parsed_arguments(call: Any) -> dict[str, Any] | None:
+    """A tool call's arguments, parsed — or ``None`` when they do not parse.
+
+    Distinct from :func:`_openai_arguments` below: a read tool (``get_market``,
+    ``read_receipts``) can fall back to an empty object and lose nothing, but a
+    proposal built from a fallback would silently invent blank amounts and
+    destinations, so the caller has to be able to tell "empty" from "broken".
+    """
+    function = getattr(call, "function", None)
+    raw = getattr(function, "arguments", None) if function is not None else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return {str(key): value for key, value in parsed.items()}
+
+
+def _openai_arguments(call: Any) -> dict[str, Any]:
+    return _openai_parsed_arguments(call) or {}
+
+
+def _openai_assistant_message(message: Any) -> dict[str, Any]:
+    """The assistant turn, echoed back unchanged so the tool call ids still match."""
+    if hasattr(message, "model_dump"):
+        return dict(message.model_dump(exclude_none=True))
+    return {"role": "assistant", "content": getattr(message, "content", None)}
+
+
+def _add_openai(usage: Usage, response: Any) -> Usage:
+    reported = getattr(response, "usage", None)
+    return Usage(
+        input_tokens=usage.input_tokens + _count(reported, "prompt_tokens"),
+        output_tokens=usage.output_tokens + _count(reported, "completion_tokens"),
+    )
+
+
 def _bounded(value: Any) -> int:
     try:
         limit = int(value)
@@ -457,11 +707,13 @@ def _bounded(value: Any) -> int:
 __all__ = [
     "MAX_TURNS",
     "NOTE_LENGTH",
+    "OPENAI_TOOLS",
     "SYSTEM",
     "TOOLS",
     "AnthropicModel",
     "Decision",
     "ModelPort",
+    "OpenAIModel",
     "Usage",
     "decide",
 ]

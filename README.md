@@ -77,7 +77,9 @@ is a seed, and this bundle is not where it lives.
 3. **A notary key.** `MERKL_API_KEY` (or the bundle's `notary-api-key.txt`)
    for api.merkl.ai, so the receipts are witnessed somewhere other than your
    laptop.
-4. **A model key.** `ANTHROPIC_API_KEY`.
+4. **A model key.** `ANTHROPIC_API_KEY` by default, or `OPENAI_API_KEY` if
+   `[model].provider = "openai"` — either way, whichever `[model].api_key_env`
+   names in your config.
 
 What `merkl treasury init` cannot fill in is `treasury.policy_version` — that
 is decided when you publish the policy — so it says
@@ -94,6 +96,10 @@ docker run --rm \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   ghcr.io/ramcav/merkl-trader:0.1.0
 ```
+
+Set `OPENAI_API_KEY` instead when `trader.toml`'s `[model].provider =
+"openai"` — both SDKs are in the image either way; only the one the config
+names is called.
 
 `./merkl-agent` is the bundle above, mounted read-only. Its journal and its
 state go to the named volume instead — `$MERKL_TRADER_HOME`
@@ -122,7 +128,8 @@ plain `docker compose up -d` never starts:
 docker compose -f docker-compose.prod.yml --profile trader up -d trader
 ```
 
-That service, its volumes and `ANTHROPIC_API_KEY` are defined in
+That service, its volumes and its model key — `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY`, whichever the bundled `trader.toml` names — are defined in
 `merkl-api`'s `docker-compose.prod.yml` and `.env.example` — see that
 repository's README for the three lines to start it and how to read its
 journal from the host.

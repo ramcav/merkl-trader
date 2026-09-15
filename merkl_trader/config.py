@@ -115,9 +115,14 @@ class NotaryConfig:
         raise ConfigError("notary needs either api_key_file or api_key_env")
 
 
+MODEL_PROVIDERS = ("anthropic", "openai")
+"""Every provider ``decide.py`` knows how to call."""
+
+
 @dataclasses.dataclass(frozen=True)
 class ModelConfig:
     name: str
+    provider: str
     api_key_env: str
     max_tokens: int
     usd_per_million_input: Decimal
@@ -228,6 +233,7 @@ def parse(raw: dict[str, Any]) -> Config:
         notary=_notary(notary),
         model=ModelConfig(
             name=_string(model, "name", "model"),
+            provider=_model_provider(model),
             api_key_env=_string(model, "api_key_env", "model"),
             max_tokens=_int(model, "max_tokens", "model"),
             usd_per_million_input=_decimal(model, "usd_per_million_input", "model"),
@@ -255,6 +261,22 @@ def _notary(table: dict[str, Any]) -> NotaryConfig:
         api_key_env=api_key_env,
         api_key_file=api_key_file,
     )
+
+
+def _model_provider(table: dict[str, Any]) -> str:
+    """``[model].provider`` — which API ``decide()`` calls.
+
+    Defaults to ``"anthropic"`` so a config written before this field existed
+    is unchanged. ``api_key_env`` names the environment variable for whichever
+    provider this names — ``ANTHROPIC_API_KEY`` or ``OPENAI_API_KEY`` by
+    convention, but the name itself is this field's job, not this one's.
+    """
+    provider = _optional_string(table, "provider") or "anthropic"
+    if provider not in MODEL_PROVIDERS:
+        raise ConfigError(
+            f"model.provider must be one of {list(MODEL_PROVIDERS)}, got {provider!r}"
+        )
+    return provider
 
 
 # -- secrets ---------------------------------------------------------------- #
@@ -351,6 +373,7 @@ def _loop_home(table: dict[str, Any]) -> Path:
 
 
 __all__ = [
+    "MODEL_PROVIDERS",
     "TRADER_HOME_ENV",
     "AgentConfig",
     "BillConfig",

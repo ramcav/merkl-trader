@@ -27,6 +27,7 @@ dependencies = [
     # release exists.
     "merkl-sdk[xrpl]>=0.3.0",
     "anthropic",
+    "openai",
 ]
 
 [project.urls]

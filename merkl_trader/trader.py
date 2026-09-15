@@ -411,6 +411,7 @@ class Trader:
             situation=self._situation(now, runway, burn),
             market=lambda: _ready(snapshot.to_content()),
             receipts=self._receipts,
+            provider=self.settings.model.provider,
         )
         cost = self.state.bill.accrue(
             tokens_in=decision.usage.input_tokens,
@@ -707,6 +708,19 @@ class Trader:
 # --------------------------------------------------------------------------- #
 
 
+def _model_client(model: configuration.ModelConfig) -> decisions.ModelPort:
+    """The model, over whichever provider ``[model].provider`` names.
+
+    ``decide()`` branches on the same setting rather than on this object's
+    type, but the API key still has to reach the right SDK client, which is
+    this function's one job.
+    """
+    api_key = configuration.read_secret_env(model.api_key_env)
+    if model.provider == "openai":
+        return decisions.OpenAIModel(api_key)
+    return decisions.AnthropicModel(api_key)
+
+
 async def build(settings: configuration.Config, *, dry_run: bool = False) -> Trader:
     """Assemble the real thing: signer over HTTPS, XRPL, notary, local store."""
     material = settings.agent.key_file.read_bytes()
@@ -770,7 +784,7 @@ async def build(settings: configuration.Config, *, dry_run: bool = False) -> Tra
             reference_source=settings.market.reference_source,
         ),
         store=store,
-        model=decisions.AnthropicModel(configuration.read_secret_env(settings.model.api_key_env)),
+        model=_model_client(settings.model),
         journal=books.Journal(settings.loop.journal_md, settings.loop.journal_jsonl),
         queue=EscalationQueue(settings.notary.url, api_key),
         dry_run=dry_run,
