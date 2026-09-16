@@ -216,3 +216,51 @@ def test_tilde_paths_still_expand_instead_of_joining_the_configs_directory(
     # relative paths in the very same file still anchor to the bundle, not $HOME
     assert settings.treasury.wallet_file == bundle / "wallet.json"
     assert settings.notary.api_key_file == bundle / "notary-api-key.txt"
+
+
+# --------------------------------------------------------------------------- #
+# An unreadable bundle file: the image runs as uid 10002 and every secret is
+# 0600, so a bind-mounted bundle owned by somebody else's uid is the first
+# thing a fresh deploy gets wrong. The error names the fix rather than making
+# the operator go find it in the README.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_permission_error_names_the_chown_fix(tmp_path: Path) -> None:
+    secret = tmp_path / "agent-ed25519.pem"
+    secret.write_text("unreadable")
+    secret.chmod(0o000)
+    try:
+        with pytest.raises(configuration.ConfigError, match="chown -R 10002:10002"):
+            configuration.read_secret_file(secret)
+    finally:
+        secret.chmod(0o600)  # so tmp_path can be cleaned up
+
+
+def test_a_missing_file_is_not_told_to_chown_anything(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist.pem"
+    with pytest.raises(configuration.ConfigError) as excinfo:
+        configuration.read_secret_file(missing)
+    assert "chown" not in str(excinfo.value)
+
+
+def test_an_unreadable_trader_toml_also_names_the_fix(tmp_path: Path) -> None:
+    unreadable = tmp_path / "trader.toml"
+    unreadable.write_text("[agent]\n")
+    unreadable.chmod(0o000)
+    try:
+        with pytest.raises(configuration.ConfigError, match="chown -R 10002:10002"):
+            configuration.load(unreadable)
+    finally:
+        unreadable.chmod(0o600)
+
+
+def test_read_bundle_bytes_is_the_same_hint_for_the_key_file(tmp_path: Path) -> None:
+    key = tmp_path / "agent-ed25519.pem"
+    key.write_bytes(b"unreadable")
+    key.chmod(0o000)
+    try:
+        with pytest.raises(configuration.ConfigError, match="chown -R 10002:10002"):
+            configuration.read_bundle_bytes(key)
+    finally:
+        key.chmod(0o600)

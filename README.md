@@ -19,6 +19,7 @@ merkl_trader/
   decide.py             what the model says — the part you replace
   ledger.py             the agent's own books: state, the compute bill, the journal
   config.py             one TOML file, validated once
+  harness/loop.py        a second reference agent — see "The harness" below
 config.example.toml     a worked example, commented
 Dockerfile              the image this repository publishes
 ```
@@ -106,6 +107,19 @@ state go to the named volume instead — `$MERKL_TRADER_HOME`
 (`merkl_trader/config.py`) is set to `/var/lib/merkl-trader` in the image,
 because `trader.toml` itself still names `~/.merkl/trader` and a read-only
 `/agent` cannot be edited to say otherwise.
+
+> **Permissions.** The image runs as uid 10002, and every file `merkl treasury
+> init` writes is `0600` — owned by whoever ran that command, not by the
+> container. If `./merkl-agent` is not readable by uid 10002, the trader exits
+> with a one-line error naming the fix:
+> ```
+> configuration: cannot read /agent/agent-ed25519.pem: [Errno 13] Permission
+> denied. The image runs as uid 10002 and every file in the bundle is 0600 —
+> fix with `chown -R 10002:10002 /agent`.
+> ```
+> On the host, that is `sudo chown -R 10002:10002 ./merkl-agent` before the
+> first `docker run`. A file that is simply missing gets the plain message
+> instead — there is nothing to `chown`.
 
 From a checkout, without Docker:
 
@@ -204,6 +218,47 @@ Bought 100 TST for at most 2 XRP. Settled. receipt b97b9f53858e3d6b6050c242cc1fd
 pretends to be — the receipt is the evidence, in `receipts/` and at the
 notary. The journal is the part a human reads over coffee.
 
+## The harness: the same agent on a real framework
+
+```bash
+python -m merkl_trader.harness --config trader.toml            # the loop
+python -m merkl_trader.harness --config trader.toml --once     # one cycle, then exit
+```
+
+Where `python -m merkl_trader` is deliberately no framework, `python -m
+merkl_trader.harness` is the same mandate, the same journal, the same wake-up
+interval — decided by one run of an [OpenAI Agents
+SDK](https://github.com/openai/openai-agents-python) agent instead of
+`decide.py`'s four hand-rolled tools. It needs `[model].provider = "openai"`
+in `trader.toml` and `OPENAI_API_KEY` (or whatever `[model].api_key_env`
+names), and it mounts two tool sources:
+
+- **`WebSearchTool()`** — news and reference prices. Never what a trade would
+  actually cost; that is what `get_market` is for.
+- **[`merkl-mcp`](https://github.com/ramcav/merkl-mcp)**, mounted over stdio
+  (`command: merkl-mcp`) — the treasury, the market, the receipts, and the
+  only way to touch money. `get_treasury`, `get_market`, `read_receipts` and
+  `pending_approval` are reads; `propose_payment` and `propose_swap` end the
+  agent's turn the instant either answers
+  (`Agent.tool_use_behavior={"stop_at_tool_names": (...)}`) — the same
+  one-action cap `decide.py` gets from stopping at the first `tool_use` block,
+  just enforced by the SDK instead of by hand. `merkl-mcp` itself refuses a
+  second proposal while one is still waiting on a person, so the cap holds
+  even across a restart.
+
+This process is thin by design: unlike `trader.py`, it keeps no local
+`State`, no nonce, no in-flight bookkeeping, and no compute-bill accrual — the
+market, the receipts and the crash-safety already live behind `merkl-mcp`'s
+own `ReceiptBuilder`. The system prompt (`harness/loop.py`'s `system_prompt()`)
+states the mandate verbatim, that a weekly bill is owed to the operator
+(never the amount — `get_treasury` names no figure), that a policy exists
+whose limits are not disclosed, and that a refusal is information.
+
+`merkl-mcp` is installed from PyPI/git in the published image; during
+development, install it editable from a sibling checkout
+(`uv pip install -p .venv/bin/python -e ../merkl-mcp`) so `merkl-mcp` is on
+`$PATH` inside the venv.
+
 ## Replacing the decision function
 
 `decide.decide()` takes a `ModelPort` — one method, `create(**request)` — and
@@ -224,6 +279,11 @@ encrypted keystore and real sealed window state, real receipts on disk,
 against `merkl-sdk`'s in-memory rail. Two things are stubbed — the model (a
 scripted list of replies) and the XRPL node (`httpx.MockTransport`, so
 `market.py`'s own JSON-RPC parsing is exercised rather than skipped).
+
+`tests/test_harness.py` does the same for the harness, against a real
+`MCPServerStdio` subprocess speaking the shared contract
+(`tests/fake_mcp_server.py`) and the Agents SDK's own `agents.testing.ScriptedModel`
+— no key, no network, no dependence on the real `merkl-mcp`'s own progress.
 
 ```bash
 ruff check merkl_trader tests
