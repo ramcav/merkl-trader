@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.source="https://github.com/ramcav/merkl-trader" \
       org.opencontainers.image.description="Merkl reference trading agent"
 
 COPY . /src
-RUN pip install --no-cache-dir /src && rm -rf /src
+RUN pip install --no-cache-dir /src "merkl-mcp @ git+https://github.com/ramcav/merkl-mcp@v0.1.0" && rm -rf /src
 
 # Unprivileged from the start: unlike the signer image, there is no
 # host-owned bind mount to chown before this starts — /agent arrives
