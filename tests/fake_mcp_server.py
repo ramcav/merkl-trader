@@ -57,7 +57,10 @@ _DEFAULT_MARKET: dict[str, Any] = {
     "sizes": {},
 }
 
-_DEFAULT_PROPOSE: dict[str, Any] = {"outcome": "refused", "rule": "no script configured a propose answer"}
+_DEFAULT_PROPOSE: dict[str, Any] = {
+    "outcome": "refused",
+    "rule": "no script configured a propose answer",
+}
 
 
 def _load_script() -> dict[str, Any]:

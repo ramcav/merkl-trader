@@ -239,9 +239,10 @@ class Harness:
         status = str(payload.get("status", "none")) if isinstance(payload, dict) else "none"
         if status == "none":
             return None
+        said = _flat(json.dumps(payload))[:NOTE_LENGTH]
         if status == "waiting":
-            return f"Waiting on a human: {_flat(json.dumps(payload))[:NOTE_LENGTH]}", "escalated"
-        return f"A human answered an earlier proposal: {_flat(json.dumps(payload))[:NOTE_LENGTH]}", status
+            return f"Waiting on a human: {said}", "escalated"
+        return f"A human answered an earlier proposal: {said}", status
 
     # -- step 1: ask the model ------------------------------------------------ #
 
@@ -259,9 +260,7 @@ class Harness:
             mcp_servers=[self.server],
             tool_use_behavior={"stop_at_tool_names": list(PROPOSAL_TOOLS)},
         )
-        situation = _situation(
-            now, wake_minutes=max(1, self.settings.loop.interval_seconds // 60)
-        )
+        situation = _situation(now, wake_minutes=max(1, self.settings.loop.interval_seconds // 60))
         return await Runner.run(agent, situation, max_turns=MAX_TURNS)
 
     # -- step 2: what happened ------------------------------------------------ #
