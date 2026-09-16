@@ -24,12 +24,20 @@ merkl_trader/
                          it resolves against trader.toml's own directory, not
                          the process's cwd; $MERKL_TRADER_HOME overrides
                          [loop].home for the Docker image
+harness/loop.py         python -m merkl_trader.harness: the same mandate,
+                         journal and interval, decided by one OpenAI Agents
+                         SDK run against WebSearchTool and the merkl-mcp
+                         server (stdio) instead of decide.py's four tools
 tests/test_trader.py    end to end against merkl-sdk's in-memory rail, a real
                          signer and a scripted model
-tests/test_config.py    the $MERKL_TRADER_HOME override and path resolution
-                         (relative, absolute, ~)
+tests/test_harness.py   end to end against a fake merkl-mcp (stdio) and the
+                         Agents SDK's own ScriptedModel test double
+tests/test_config.py    the $MERKL_TRADER_HOME override, path resolution
+                         (relative, absolute, ~) and the chown-10002 hint on
+                         an unreadable bundle file
 config.example.toml     a worked example, commented — copy to trader.toml
-Dockerfile              python -m merkl_trader, read-only /agent
+Dockerfile              python -m merkl_trader (default) or
+                         python -m merkl_trader.harness, read-only /agent
 ```
 
 ## Install
@@ -81,6 +89,39 @@ hand either loop a plain `ModelPort` fake. An OpenAI tool call whose
 arguments are not valid JSON, or a model call that raises (bad key, no
 network), ends the cycle as a hold with a note — never a proposal built from
 blanks, never a traceback the caller has to handle.
+
+## The harness (`harness/loop.py`)
+
+`python -m merkl_trader.harness --config trader.toml [--once]` — phase 23's
+second reference agent, built on `openai-agents` instead of a hand-rolled
+tool loop. It requires `[model].provider = "openai"` in the same
+`trader.toml` (a plain `ConfigError` otherwise) and mounts two tool sources on
+an `agents.Agent`: `WebSearchTool()` and `merkl-mcp` over stdio
+(`MCPServerStdio`, command `merkl-mcp`, `MERKL_AGENT_DIR` set to the config's
+own directory). It holds none of `trader.py`'s state — no nonce, no in-flight
+bookkeeping, no `Bill` accrual — because the market, the treasury, the
+receipts and the one-proposal-at-a-time rule all live behind merkl-mcp's own
+`ReceiptBuilder` now; this process only journals what came back.
+`Agent.tool_use_behavior={"stop_at_tool_names": ("propose_payment",
+"propose_swap")}` ends a turn structurally the instant either tool answers,
+the SDK-native equivalent of `decide.py` stopping at the first `tool_use`
+block. `tests/fake_mcp_server.py` (`mcp.server.mcpserver.MCPServer`, the
+`mcp>=2` API — merkl-mcp itself pins `mcp<2` for `FastMCP`, a different
+package the wire protocol doesn't care about) stands in for merkl-mcp in
+tests, scripted by one JSON file (`FAKE_MCP_SCRIPT`); `agents.testing
+.ScriptedModel` stands in for the model, the Agents SDK's own test double.
+
+## Unreadable bundle files
+
+The image runs as uid 10002 and every bundle secret is 0600
+(`config.example.toml`), so a bind-mounted bundle owned by a different uid is
+the first thing a fresh deploy gets wrong. `config.permission_error()` turns
+that `PermissionError` into a one-line fix naming `chown -R 10002:10002
+<dir>`; `config.load()`, `read_secret_file()` and the new
+`read_bundle_bytes()` (the Ed25519 key, read as bytes) all route through it,
+and `trader.py`'s `build()` wraps `load_wallets()` the same way. A missing
+file (as opposed to an unreadable one) keeps the plain message — there is
+nothing to `chown`.
 
 ## Guidelines
 
