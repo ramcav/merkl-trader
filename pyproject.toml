@@ -28,6 +28,7 @@ dependencies = [
     "merkl-sdk[xrpl]>=0.3.0",
     "anthropic",
     "openai",
+    "openai-agents",
 ]
 
 [project.urls]

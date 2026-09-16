@@ -723,7 +723,7 @@ def _model_client(model: configuration.ModelConfig) -> decisions.ModelPort:
 
 async def build(settings: configuration.Config, *, dry_run: bool = False) -> Trader:
     """Assemble the real thing: signer over HTTPS, XRPL, notary, local store."""
-    material = settings.agent.key_file.read_bytes()
+    material = configuration.read_bundle_bytes(settings.agent.key_file)
     loaded = serialization.load_pem_private_key(material, password=None)
     if not isinstance(loaded, Ed25519PrivateKey):
         raise configuration.ConfigError(f"{settings.agent.key_file} is not an Ed25519 private key")
@@ -741,7 +741,10 @@ async def build(settings: configuration.Config, *, dry_run: bool = False) -> Tra
     signer = DevSignerClient(base_url=settings.signer.url, bearer_token=token)
     policy_public_key = await signer.public_key()
 
-    wallets = load_wallets(settings.treasury.wallet_file)
+    try:
+        wallets = load_wallets(settings.treasury.wallet_file)
+    except OSError as exc:
+        raise configuration.permission_error(settings.treasury.wallet_file, exc) from exc
     if settings.treasury.wallet_name not in wallets:
         raise configuration.ConfigError(
             f"{settings.treasury.wallet_file} has no wallet called "
