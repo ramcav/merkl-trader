@@ -175,17 +175,31 @@ class Config:
 
 def load(path: Path | str) -> Config:
     """Read and validate the whole file. Raises rather than defaulting."""
+    given = Path(path).expanduser()
     try:
-        raw = tomllib.loads(Path(path).read_text())
+        raw = tomllib.loads(given.read_text())
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
-    return parse(raw)
+    return parse(raw, base_dir=given.parent)
 
 
-def parse(raw: dict[str, Any]) -> Config:
-    """Build a :class:`Config` from an already-parsed TOML document."""
+def parse(raw: dict[str, Any], *, base_dir: Path | None = None) -> Config:
+    """Build a :class:`Config` from an already-parsed TOML document.
+
+    ``base_dir`` anchors every relative path this config names — ``key_file``,
+    ``wallet_file``, ``token_file``, ``api_key_file``, ``[loop].home`` — to the
+    directory ``trader.toml`` itself lives in, never the process's working
+    directory. The bundle is a folder that describes itself from the inside
+    (``merkl-sdk``'s ``bundle.py``: "paths inside trader.toml are relative, so
+    the folder can be moved"), and a container started with ``--config
+    /agent/trader.toml`` has no reason to share a working directory with
+    ``/agent``. ``load()`` always passes this; a caller that hands ``parse()``
+    a dict directly — mainly tests — gets today's behaviour, relative to the
+    process's own working directory, if it leaves this unset.
+    """
+    base_dir = base_dir if base_dir is not None else Path.cwd()
     agent = _table(raw, "agent")
     treasury = _table(raw, "treasury")
     rail = _table(raw, "rail")
@@ -203,13 +217,13 @@ def parse(raw: dict[str, Any]) -> Config:
     return Config(
         agent=AgentConfig(
             agent_id=_string(agent, "agent_id", "agent"),
-            key_file=_path(agent, "key_file", "agent"),
+            key_file=_path(agent, "key_file", "agent", base_dir),
             mandate=_string(agent, "mandate", "agent"),
         ),
         treasury=TreasuryConfig(
             address=_string(treasury, "address", "treasury"),
             policy_version=_string(treasury, "policy_version", "treasury"),
-            wallet_file=_path(treasury, "wallet_file", "treasury"),
+            wallet_file=_path(treasury, "wallet_file", "treasury", base_dir),
             wallet_name=_string(treasury, "wallet_name", "treasury"),
         ),
         rail=RailConfig(
@@ -228,9 +242,9 @@ def parse(raw: dict[str, Any]) -> Config:
         ),
         signer=SignerConfig(
             url=_string(signer, "url", "signer"),
-            token_file=_optional_path(signer, "token_file"),
+            token_file=_optional_path(signer, "token_file", base_dir),
         ),
-        notary=_notary(notary),
+        notary=_notary(notary, base_dir),
         model=ModelConfig(
             name=_string(model, "name", "model"),
             provider=_model_provider(model),
@@ -241,15 +255,15 @@ def parse(raw: dict[str, Any]) -> Config:
         ),
         loop=LoopConfig(
             interval_seconds=_int(loop, "interval_seconds", "loop"),
-            home=_loop_home(loop),
+            home=_loop_home(loop, base_dir),
         ),
         bill=BillConfig(bill_day=day, operator=_string(bill, "operator", "bill")),
     )
 
 
-def _notary(table: dict[str, Any]) -> NotaryConfig:
+def _notary(table: dict[str, Any], base_dir: Path) -> NotaryConfig:
     """``[notary]`` — one of the two ways of naming the API key, or a refusal."""
-    api_key_file = _optional_path(table, "api_key_file")
+    api_key_file = _optional_path(table, "api_key_file", base_dir)
     api_key_env = _optional_string(table, "api_key_env")
     if api_key_file is None and api_key_env is None:
         raise ConfigError(
@@ -355,21 +369,35 @@ def _decimals(table: dict[str, Any], key: str) -> tuple[Decimal, ...]:
     return tuple(out)
 
 
-def _path(table: dict[str, Any], key: str, owner: str) -> Path:
-    return Path(_string(table, key, owner)).expanduser()
+def _path(table: dict[str, Any], key: str, owner: str, base_dir: Path) -> Path:
+    return _resolve(Path(_string(table, key, owner)), base_dir)
 
 
-def _optional_path(table: dict[str, Any], key: str) -> Path | None:
+def _optional_path(table: dict[str, Any], key: str, base_dir: Path) -> Path | None:
     value = _optional_string(table, key)
-    return None if value is None else Path(value).expanduser()
+    return None if value is None else _resolve(Path(value), base_dir)
 
 
-def _loop_home(table: dict[str, Any]) -> Path:
+def _resolve(path: Path, base_dir: Path) -> Path:
+    """A config path, anchored to where ``trader.toml`` lives, not the
+    process's working directory.
+
+    ``~`` still expands to the operator's home directory regardless of where
+    the bundle lives, and an already-absolute path is left alone; anything
+    else is joined onto ``base_dir``, because the bundle travels as a folder
+    whose paths describe themselves from inside it (``merkl-sdk``'s
+    ``bundle.py``), not from wherever the process happened to be started.
+    """
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else base_dir / expanded
+
+
+def _loop_home(table: dict[str, Any], base_dir: Path) -> Path:
     """``$MERKL_TRADER_HOME`` if set, else ``[loop].home``."""
     override = os.environ.get(TRADER_HOME_ENV, "").strip()
     if override:
         return Path(override).expanduser()
-    return _path(table, "home", "loop")
+    return _path(table, "home", "loop", base_dir)
 
 
 __all__ = [

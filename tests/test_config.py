@@ -92,3 +92,127 @@ def test_provider_can_be_named_explicitly() -> None:
 def test_an_unknown_provider_is_a_configerror() -> None:
     with pytest.raises(configuration.ConfigError, match="model.provider"):
         configuration.parse(_with_model(provider="gemini"))
+
+
+# --------------------------------------------------------------------------- #
+# Every path in the config, anchored to trader.toml's own directory — not the
+# process's working directory. This is the production bug: a container
+# started as `--config /agent/trader.toml` has no reason to share a working
+# directory with /agent, and `key_file = "agent-ed25519.pem"` (relative, by
+# design, so the bundle can move) must still resolve.
+# --------------------------------------------------------------------------- #
+
+
+def _toml(document: dict[str, dict[str, object]]) -> str:
+    """A minimal, purpose-built TOML writer — just enough for this file's tables."""
+    lines: list[str] = []
+    for section, fields in document.items():
+        lines.append(f"[{section}]")
+        for key, value in fields.items():
+            if isinstance(value, bool):
+                lines.append(f"{key} = {'true' if value else 'false'}")
+            elif isinstance(value, int):
+                lines.append(f"{key} = {value}")
+            elif isinstance(value, list):
+                items = ", ".join(f'"{entry}"' for entry in value)
+                lines.append(f"{key} = [{items}]")
+            else:
+                escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+                lines.append(f'{key} = "{escaped}"')
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _bundle_document(
+    *, key_file: str, wallet_file: str, token_file: str, api_key_file: str, home: str
+) -> dict[str, dict[str, object]]:
+    document = copy.deepcopy(RAW)
+    document["agent"]["key_file"] = key_file  # type: ignore[index]
+    document["treasury"]["wallet_file"] = wallet_file  # type: ignore[index]
+    document["signer"]["token_file"] = token_file  # type: ignore[index]
+    document["notary"]["api_key_file"] = api_key_file  # type: ignore[index]
+    document["loop"]["home"] = home  # type: ignore[index]
+    return document  # type: ignore[return-value]
+
+
+def test_relative_paths_resolve_against_the_configs_own_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "agent"
+    bundle.mkdir()
+    (bundle / "trader.toml").write_text(
+        _toml(
+            _bundle_document(
+                key_file="agent-ed25519.pem",
+                wallet_file="wallet.json",
+                token_file="relay-token.txt",
+                api_key_file="notary-api-key.txt",
+                home="state",
+            )
+        )
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # the container's cwd is never the bundle's directory
+
+    settings = configuration.load(bundle / "trader.toml")
+
+    assert settings.agent.key_file == bundle / "agent-ed25519.pem"
+    assert settings.treasury.wallet_file == bundle / "wallet.json"
+    assert settings.signer.token_file == bundle / "relay-token.txt"
+    assert settings.notary.api_key_file == bundle / "notary-api-key.txt"
+    assert settings.loop.home == bundle / "state"
+
+
+def test_absolute_paths_are_left_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = tmp_path / "agent"
+    bundle.mkdir()
+    secrets = tmp_path / "secrets-elsewhere"
+    secrets.mkdir()
+    (bundle / "trader.toml").write_text(
+        _toml(
+            _bundle_document(
+                key_file=str(secrets / "agent-ed25519.pem"),
+                wallet_file=str(secrets / "wallet.json"),
+                token_file=str(secrets / "relay-token.txt"),
+                api_key_file=str(secrets / "notary-api-key.txt"),
+                home=str(tmp_path / "state"),
+            )
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+
+    settings = configuration.load(bundle / "trader.toml")
+
+    assert settings.agent.key_file == secrets / "agent-ed25519.pem"
+    assert settings.treasury.wallet_file == secrets / "wallet.json"
+    assert settings.signer.token_file == secrets / "relay-token.txt"
+    assert settings.notary.api_key_file == secrets / "notary-api-key.txt"
+    assert settings.loop.home == tmp_path / "state"
+
+
+def test_tilde_paths_still_expand_instead_of_joining_the_configs_directory(
+    tmp_path: Path,
+) -> None:
+    bundle = tmp_path / "agent"
+    bundle.mkdir()
+    (bundle / "trader.toml").write_text(
+        _toml(
+            _bundle_document(
+                key_file="~/agent-ed25519.pem",
+                wallet_file="wallet.json",  # relative, alongside the ~ path, in the same file
+                token_file="~/relay-token.txt",
+                api_key_file="notary-api-key.txt",
+                home="~/.merkl/trader",
+            )
+        )
+    )
+
+    settings = configuration.load(bundle / "trader.toml")
+
+    assert settings.agent.key_file == Path("~/agent-ed25519.pem").expanduser()
+    assert settings.signer.token_file == Path("~/relay-token.txt").expanduser()
+    assert settings.loop.home == Path("~/.merkl/trader").expanduser()
+    # relative paths in the very same file still anchor to the bundle, not $HOME
+    assert settings.treasury.wallet_file == bundle / "wallet.json"
+    assert settings.notary.api_key_file == bundle / "notary-api-key.txt"
