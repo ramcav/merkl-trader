@@ -61,6 +61,7 @@ from agents.mcp import (
     MCPServerStreamableHttp,
     create_static_tool_filter,
 )
+from merkl.adapters.xrpl import currency_code
 
 from merkl_trader import config as configuration
 from merkl_trader import ledger as books
@@ -198,6 +199,7 @@ def _pair_section(market: configuration.MarketConfig | None) -> str:
     if market is None:
         return ""
     base, code, issuer = market.base, market.quote_code, market.quote_issuer
+    hexed = currency_code(code)
     return f"""
 
 Your pair: {base} against {code}, where {code} is issued by {issuer} (the same \
@@ -206,10 +208,12 @@ substitute a placeholder).
 
 Reading the book with get_book_offers: taker_gets is what the taker receives, \
 taker_pays is what the taker pays; an issued asset needs its currency and \
-issuer, XRP needs only the currency. Example, the offers of people selling \
-{base} for {code}:
+issuer, XRP needs only the currency. The ledger wants any currency code longer \
+than three characters in its 40-character hex form, so {code} must be sent as \
+{hexed} (get_treasury's currency_hex field); the plain code {code} is rejected \
+as malformed. Example, the offers of people selling {base} for {code}:
 get_book_offers(taker_gets={{"currency": "{base}"}}, taker_pays={{"currency": \
-"{code}", "issuer": "{issuer}"}}, limit=10)
+"{hexed}", "issuer": "{issuer}"}}, limit=10)
 Swap the two arguments to read the other side of the book."""
 
 

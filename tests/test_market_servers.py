@@ -201,9 +201,11 @@ def test_the_system_prompt_names_the_pair_issuer_and_the_book_call() -> None:
 
     assert (
         'get_book_offers(taker_gets={"currency": "XRP"}, taker_pays={"currency": '
-        '"RLUSD", "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"}, limit=10)'
+        '"524C555344000000000000000000000000000000", "issuer": '
+        '"rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"}, limit=10)'
     ) in prompt
     assert "issued by rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De" in prompt
+    assert "RLUSD must be sent as 524C555344000000000000000000000000000000" in prompt
 
 
 @pytest.mark.asyncio
