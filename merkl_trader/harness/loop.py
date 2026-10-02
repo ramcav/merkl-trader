@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -121,7 +123,13 @@ class SystemClock:
 # --------------------------------------------------------------------------- #
 
 
-def system_prompt(mandate: str, *, operator: str, bill_day: str) -> str:
+def system_prompt(
+    mandate: str,
+    *,
+    operator: str,
+    bill_day: str,
+    market: configuration.MarketConfig | None = None,
+) -> str:
     """The agent's whole job description for one wake-up.
 
     States: the mandate, verbatim; that a weekly compute bill exists and who
@@ -177,7 +185,32 @@ refused, settled or not — carrying your reasoning. You cannot act quietly and 
 you cannot revise a receipt afterwards. Write reasoning you would be content \
 to have read back to you.
 
-Amounts are decimal strings, never numbers: "12.5", not 12.5."""
+Amounts are decimal strings, never numbers: "12.5", not 12.5.\
+{_pair_section(market)}"""
+
+
+def _pair_section(market: configuration.MarketConfig | None) -> str:
+    """The pair, with its issuer, and the exact shape ``get_book_offers`` takes.
+
+    The ledger server wants ``taker_gets`` / ``taker_pays`` dicts with a
+    ``currency`` and, for an issued asset, an ``issuer``. Without the issuer
+    spelled out the agent invents a placeholder and the query is malformed."""
+    if market is None:
+        return ""
+    base, code, issuer = market.base, market.quote_code, market.quote_issuer
+    return f"""
+
+Your pair: {base} against {code}, where {code} is issued by {issuer} (the same \
+issuer get_treasury's assets and market fields name; copy it exactly, never \
+substitute a placeholder).
+
+Reading the book with get_book_offers: taker_gets is what the taker receives, \
+taker_pays is what the taker pays; an issued asset needs its currency and \
+issuer, XRP needs only the currency. Example, the offers of people selling \
+{base} for {code}:
+get_book_offers(taker_gets={{"currency": "{base}"}}, taker_pays={{"currency": \
+"{code}", "issuer": "{issuer}"}}, limit=10)
+Swap the two arguments to read the other side of the book."""
 
 
 def _situation(now: str, *, wake_minutes: int) -> str:
@@ -235,9 +268,29 @@ def xrpl_server(
     )
 
 
+class _TerminationFilter(logging.Filter):
+    """The remote server answers 404 to the client's session-termination DELETE;
+    the library logs it as a warning. Nothing is wrong, so nothing is said."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Session termination failed" not in record.getMessage()
+
+
+logging.getLogger("mcp.client.streamable_http").addFilter(_TerminationFilter())
+
+
+class QuietStreamableHttp(MCPServerStreamableHttp):
+    """A streamable-HTTP server whose shutdown never raises: a session that
+    cannot be terminated politely is simply dropped."""
+
+    async def cleanup(self) -> None:
+        with contextlib.suppress(Exception):  # closing a read-only price feed is best effort
+            await super().cleanup()
+
+
 def coingecko_server(url: str = COINGECKO_MCP_URL) -> MCPServerStreamableHttp:
     """CoinGecko's remote MCP server, keyless, for reference prices."""
-    return MCPServerStreamableHttp(
+    return QuietStreamableHttp(
         params={"url": url}, name="coingecko", client_session_timeout_seconds=30
     )
 
@@ -328,6 +381,7 @@ class Harness:
                 self.settings.agent.mandate,
                 operator=self.settings.bill.operator,
                 bill_day=self.settings.bill.bill_day,
+                market=self.settings.market,
             ),
             model=self._model or self.settings.model.name,
             model_settings=ModelSettings(max_tokens=self.settings.model.max_tokens),

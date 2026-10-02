@@ -182,3 +182,45 @@ async def test_a_dropped_market_server_is_loud_in_the_journal(tmp_path: Path) ->
         entry = await harness.one_cycle()
 
     assert entry.headline.startswith("ledger server unavailable: Connection closed.")
+
+
+def test_the_system_prompt_names_the_pair_issuer_and_the_book_call() -> None:
+    from merkl_trader import config as configuration
+
+    market = configuration.MarketConfig(
+        base="XRP",
+        quote_code="RLUSD",
+        quote_issuer="rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De",
+        depths=(),
+        reference_url="https://x.invalid",
+        reference_path=("a",),
+        reference_source="s",
+    )
+
+    prompt = loop.system_prompt("m", operator="rOP", bill_day="monday", market=market)
+
+    assert (
+        'get_book_offers(taker_gets={"currency": "XRP"}, taker_pays={"currency": '
+        '"RLUSD", "issuer": "rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De"}, limit=10)'
+    ) in prompt
+    assert "issued by rMxCKbEDwqr76QuheSUMdEGf4B9xJ8m5De" in prompt
+
+
+@pytest.mark.asyncio
+async def test_coingecko_shutdown_never_raises_and_the_404_warning_is_silent(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    server = loop.coingecko_server()
+    assert isinstance(server, loop.QuietStreamableHttp)
+
+    async def boom(self) -> None:
+        raise RuntimeError("Session termination failed: 404")
+
+    monkeypatch.setattr(MCPServerStreamableHttp, "cleanup", boom)
+    await server.cleanup()  # must not raise
+
+    with caplog.at_level(logging.WARNING, logger="mcp.client.streamable_http"):
+        logging.getLogger("mcp.client.streamable_http").warning("Session termination failed: 404")
+    assert "Session termination failed" not in caplog.text
