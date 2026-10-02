@@ -177,7 +177,7 @@ Four tools and nothing else:
 
 | tool | what it does |
 |---|---|
-| `get_market()` | the book, the balances, the reference price |
+| `get_market()` | the book, the balances, the reference price (plain loop only) |
 | `read_receipts(limit)` | its own recent proposals, decisions and refusals |
 | `propose_swap(sell_asset, sell_max_amount, buy_asset, buy_amount, reasoning)` | ends the cycle |
 | `propose_payment(destination, amount, asset, reasoning)` | ends the cycle |
@@ -231,24 +231,35 @@ interval — decided by one run of an [OpenAI Agents
 SDK](https://github.com/openai/openai-agents-python) agent instead of
 `decide.py`'s four hand-rolled tools. It needs `[model].provider = "openai"`
 in `trader.toml` and `OPENAI_API_KEY` (or whatever `[model].api_key_env`
-names), and it mounts two tool sources:
+names), and it mounts four tool sources:
 
-- **`WebSearchTool()`** — news and reference prices. Never what a trade would
-  actually cost; that is what `get_market` is for.
+- **`WebSearchTool()`** — news.
 - **[`merkl-mcp`](https://github.com/ramcav/merkl-mcp)**, mounted over stdio
-  (`command: merkl-mcp`) — the treasury, the market, the receipts, and the
-  only way to touch money. `get_treasury`, `get_market`, `read_receipts` and
-  `pending_approval` are reads; `propose_payment` and `propose_swap` end the
-  agent's turn the instant either answers
-  (`Agent.tool_use_behavior={"stop_at_tool_names": (...)}`) — the same
+  (`command: merkl-mcp`) — money and evidence, nothing else. `get_treasury`,
+  `read_receipts`, `verify_receipt` and `pending_approval` are reads;
+  `propose_payment` and `propose_swap` end the agent's turn the instant either
+  answers (`Agent.tool_use_behavior={"stop_at_tool_names": (...)}`) — the same
   one-action cap `decide.py` gets from stopping at the first `tool_use` block,
   just enforced by the SDK instead of by hand. `merkl-mcp` itself refuses a
   second proposal while one is still waiting on a person, so the cap holds
   even across a restart.
+- **`xrpl-mcp-server`** (lgcarrier's, pip `iflow-mcp_lgcarrier-xrpl-mcp-server`)
+  over stdio, with `XRPL_NODE_URL` taken from `[rail].json_rpc_url` — the order
+  book. It is tool-filtered to four reads: `get_book_offers`,
+  `get_account_info`, `get_account_lines`, `get_transaction_info`. Its
+  `submit_transaction` is never visible to the agent.
+- **CoinGecko's official remote MCP**, `https://mcp.api.coingecko.com/mcp`
+  (keyless, streamable HTTP) — reference prices. Turn it off with
+  `[harness] coingecko = false`.
+
+The agent has no market tool of our own: the book comes from the ledger
+server, reference prices from CoinGecko, news from web search, and money only
+through Merkl. A market server that is down at start-up is dropped with a
+note on stderr, not fatal.
 
 This process is thin by design: unlike `trader.py`, it keeps no local
 `State`, no nonce, no in-flight bookkeeping, and no compute-bill accrual — the
-market, the receipts and the crash-safety already live behind `merkl-mcp`'s
+treasury, the receipts and the crash-safety already live behind `merkl-mcp`'s
 own `ReceiptBuilder`. The system prompt (`harness/loop.py`'s `system_prompt()`)
 states the mandate verbatim, that a weekly bill is owed to the operator
 (never the amount — `get_treasury` names no figure), that a policy exists

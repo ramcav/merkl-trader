@@ -18,12 +18,23 @@ Releases are cut by pushing a `v<version>` tag; see
   an OpenAI Agents SDK agent (`openai-agents`) instead of `decide.py`'s four
   hand-rolled tools: `WebSearchTool` for news and reference prices, and the
   [`merkl-mcp`](https://github.com/ramcav/merkl-mcp) server mounted over
-  stdio for the treasury, the market, the receipts and the one proposal at a
+  stdio for the treasury, the receipts and the one proposal at a
   time rule. `Agent.tool_use_behavior={"stop_at_tool_names": (...)}` ends a
   turn structurally the instant `propose_payment` or `propose_swap` answers.
   Tested end to end against a fake `merkl-mcp` (`tests/fake_mcp_server.py`,
   a real stdio subprocess) and the Agents SDK's own `ScriptedModel` test
   double — no key, no network.
+
+- **The harness takes its market from existing MCP servers.** Beside
+  `merkl-mcp` (money and evidence only: `get_treasury`, `propose_payment`,
+  `propose_swap`, `pending_approval`, `read_receipts`, `verify_receipt`) and
+  `WebSearchTool`, it mounts lgcarrier's `xrpl-mcp-server` over stdio
+  (`XRPL_NODE_URL` from `[rail].json_rpc_url`), tool-filtered to
+  `get_book_offers`, `get_account_info`, `get_account_lines` and
+  `get_transaction_info` so `submit_transaction` is never visible, and
+  CoinGecko's keyless remote MCP (`https://mcp.api.coingecko.com/mcp`) for
+  reference prices, switchable with `[harness] coingecko = false`. The system
+  prompt names the sources. The Dockerfile installs the ledger server.
 
 ### Fixed
 

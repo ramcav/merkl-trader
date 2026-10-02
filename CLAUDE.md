@@ -95,17 +95,24 @@ blanks, never a traceback the caller has to handle.
 `python -m merkl_trader.harness --config trader.toml [--once]` — phase 23's
 second reference agent, built on `openai-agents` instead of a hand-rolled
 tool loop. It requires `[model].provider = "openai"` in the same
-`trader.toml` (a plain `ConfigError` otherwise) and mounts two tool sources on
-an `agents.Agent`: `WebSearchTool()` and `merkl-mcp` over stdio
+`trader.toml` (a plain `ConfigError` otherwise) and mounts four tool sources on
+an `agents.Agent` (phase 24): `WebSearchTool()`, `merkl-mcp` over stdio
 (`MCPServerStdio`, command `merkl-mcp`, `MERKL_AGENT_DIR` set to the config's
-own directory). It holds none of `trader.py`'s state — no nonce, no in-flight
-bookkeeping, no `Bill` accrual — because the market, the treasury, the
+own directory; money and evidence only), `xrpl-mcp-server` over stdio
+(`XRPL_NODE_URL` from `[rail].json_rpc_url`, `tool_filter` allowlist of
+`get_book_offers`, `get_account_info`, `get_account_lines`,
+`get_transaction_info` — `submit_transaction` is never visible) and CoinGecko's
+keyless remote MCP (`MCPServerStreamableHttp`, off with `[harness] coingecko =
+false`). The harness has no market tool of its own. A market server that fails
+to connect is dropped, not fatal. It holds none of `trader.py`'s state — no nonce, no in-flight
+bookkeeping, no `Bill` accrual — because the treasury, the
 receipts and the one-proposal-at-a-time rule all live behind merkl-mcp's own
 `ReceiptBuilder` now; this process only journals what came back.
 `Agent.tool_use_behavior={"stop_at_tool_names": ("propose_payment",
 "propose_swap")}` ends a turn structurally the instant either tool answers,
 the SDK-native equivalent of `decide.py` stopping at the first `tool_use`
-block. `tests/fake_mcp_server.py` (`mcp.server.mcpserver.MCPServer`, the
+block. `tests/fake_market_servers.py` fakes the ledger server (all nine tools, to
+prove the filter) and CoinGecko; `tests/fake_mcp_server.py` (`mcp.server.mcpserver.MCPServer`, the
 `mcp>=2` API — merkl-mcp itself pins `mcp<2` for `FastMCP`, a different
 package the wire protocol doesn't care about) stands in for merkl-mcp in
 tests, scripted by one JSON file (`FAKE_MCP_SCRIPT`); `agents.testing
