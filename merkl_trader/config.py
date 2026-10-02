@@ -158,6 +158,14 @@ class BillConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class HarnessConfig:
+    """``[harness]`` — optional; only ``python -m merkl_trader.harness`` reads it."""
+
+    coingecko: bool = True
+    """Mount the official keyless CoinGecko MCP server for reference prices."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     agent: AgentConfig
     treasury: TreasuryConfig
@@ -168,6 +176,7 @@ class Config:
     model: ModelConfig
     loop: LoopConfig
     bill: BillConfig
+    harness: HarnessConfig = dataclasses.field(default_factory=HarnessConfig)
 
 
 # -- reading ---------------------------------------------------------------- #
@@ -258,7 +267,17 @@ def parse(raw: dict[str, Any], *, base_dir: Path | None = None) -> Config:
             home=_loop_home(loop, base_dir),
         ),
         bill=BillConfig(bill_day=day, operator=_string(bill, "operator", "bill")),
+        harness=_harness(raw.get("harness", {})),
     )
+
+
+def _harness(table: Any) -> HarnessConfig:
+    if not isinstance(table, dict):
+        raise ConfigError("[harness] must be a table")
+    coingecko = table.get("coingecko", True)
+    if not isinstance(coingecko, bool):
+        raise ConfigError("harness.coingecko must be true or false")
+    return HarnessConfig(coingecko=coingecko)
 
 
 def _notary(table: dict[str, Any], base_dir: Path) -> NotaryConfig:
