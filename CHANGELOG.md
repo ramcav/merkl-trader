@@ -34,7 +34,9 @@ Releases are cut by pushing a `v<version>` tag; see
   `get_transaction_info` so `submit_transaction` is never visible, and
   CoinGecko's keyless remote MCP (`https://mcp.api.coingecko.com/mcp`) for
   reference prices, switchable with `[harness] coingecko = false`. The system
-  prompt names the sources. The Dockerfile installs the ledger server.
+  prompt names the sources. The ledger server runs as `python -m xrpl_mcp_server` (its console script is
+  broken) from its own `mcp<2` venv in the Dockerfile (`XRPL_MCP_PYTHON`); a
+  server that fails to start is named at the head of every journal line.
 
 ### Fixed
 

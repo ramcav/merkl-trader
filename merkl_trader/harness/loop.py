@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
@@ -65,8 +66,16 @@ from merkl_trader import ledger as books
 MERKL_MCP_COMMAND: Final = "merkl-mcp"
 """The console script ``merkl-mcp``'s own ``pyproject.toml`` installs."""
 
-XRPL_MCP_COMMAND: Final = "xrpl-mcp-server"
-"""lgcarrier's ``xrpl-mcp-server`` (pip ``iflow-mcp_lgcarrier-xrpl-mcp-server``)."""
+XRPL_MCP_MODULE: Final = "xrpl_mcp_server"
+"""lgcarrier's server (pip ``iflow-mcp_lgcarrier-xrpl-mcp-server``), run as
+``python -m xrpl_mcp_server``: the package's ``xrpl-mcp-server`` console script is
+broken (it imports a ``main`` the module does not define). The module prints
+three banner lines to stdout before its first frame; the Agents SDK's stdio
+client skips them. The server needs ``mcp<2`` (``mcp.server.fastmcp``) while
+this package runs on ``mcp>=2``, so ``$XRPL_MCP_PYTHON`` may name another
+interpreter (the image gives it its own venv)."""
+
+XRPL_MCP_PYTHON_ENV: Final = "XRPL_MCP_PYTHON"
 
 XRPL_READ_TOOLS: Final = (
     "get_book_offers",
@@ -203,13 +212,23 @@ def mcp_server(bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND) -> MCPServ
     )
 
 
+def xrpl_command() -> tuple[str, list[str]]:
+    """The interpreter and arguments that start the ledger server over stdio."""
+    return os.environ.get(XRPL_MCP_PYTHON_ENV) or sys.executable, ["-m", XRPL_MCP_MODULE]
+
+
 def xrpl_server(
-    json_rpc_url: str, *, command: str = XRPL_MCP_COMMAND, args: Sequence[str] = ()
+    json_rpc_url: str, *, command: str | None = None, args: Sequence[str] | None = None
 ) -> MCPServerStdio:
     """The ledger server over stdio, pointed at ``[rail].json_rpc_url`` and
     tool-filtered to reads: ``submit_transaction`` is never visible."""
+    default_command, default_args = xrpl_command()
     return MCPServerStdio(
-        params={"command": command, "args": list(args), "env": {"XRPL_NODE_URL": json_rpc_url}},
+        params={
+            "command": command or default_command,
+            "args": list(default_args if args is None else args),
+            "env": {"XRPL_NODE_URL": json_rpc_url},
+        },
         name="xrpl-mcp-server",
         client_session_timeout_seconds=30,
         tool_filter=create_static_tool_filter(allowed_tool_names=list(XRPL_READ_TOOLS)),
@@ -244,6 +263,7 @@ class Harness:
         journal: books.Journal,
         server: MCPServer,
         extra_servers: Sequence[MCPServer] = (),
+        unavailable: Sequence[str] = (),
         model: Any | None = None,
         clock: Clock | None = None,
     ) -> None:
@@ -251,6 +271,7 @@ class Harness:
         self.journal = journal
         self.server = server
         self.extra_servers = tuple(extra_servers)
+        self.unavailable = tuple(unavailable)
         self._model = model
         self.clock = clock or SystemClock()
         self.cycle_count = 0
@@ -356,6 +377,8 @@ class Harness:
         tokens_in: int = 0,
         tokens_out: int = 0,
     ) -> books.Entry:
+        if self.unavailable:
+            headline = f"{'; '.join(self.unavailable)}. {headline}"
         return books.Entry(
             at=now,
             cycle=self.cycle_count,
@@ -531,6 +554,7 @@ async def _run(arguments: argparse.Namespace) -> int:
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(server)
         connected: list[MCPServer] = []
+        unavailable: list[str] = []
         for mounted in extra:
             try:  # a market source that is down is a thinner cycle, not a dead agent
                 await stack.enter_async_context(mounted)
@@ -546,6 +570,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             journal=books.Journal(settings.loop.journal_md, settings.loop.journal_jsonl),
             server=server,
             extra_servers=connected,
+            unavailable=unavailable,
         )
         return await harness.run(once=bool(arguments.once))
 
@@ -573,6 +598,7 @@ __all__ = [
     "MAX_TURNS",
     "PROPOSAL_TOOLS",
     "XRPL_READ_TOOLS",
+    "xrpl_command",
     "Harness",
     "coingecko_server",
     "market_servers",

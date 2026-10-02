@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -62,7 +64,7 @@ async def test_the_ledger_server_lists_exactly_the_four_reads() -> None:
 def test_the_real_ledger_server_is_configured_from_the_rail_url() -> None:
     server = xrpl_server(NODE)
 
-    assert server.params.command == "xrpl-mcp-server"
+    assert server.params.args == ["-m", "xrpl_mcp_server"]
     assert server.params.env == {"XRPL_NODE_URL": NODE}
     assert server.tool_filter == {"allowed_tool_names": list(XRPL_READ_TOOLS)}
 
@@ -135,3 +137,48 @@ def test_the_system_prompt_names_the_sources() -> None:
     assert "web search" in prompt.lower()
     assert "Money only goes through Merkl" in prompt
     assert "get_market" not in prompt
+
+
+def _real_ledger_python() -> str | None:
+    command, _ = loop.xrpl_command()
+    probe = "from xrpl_mcp_server.server import mcp"
+    done = subprocess.run([command, "-c", probe], capture_output=True, timeout=30, check=False)
+    return command if done.returncode == 0 else None
+
+
+def test_the_ledger_command_resolves_to_an_interpreter_that_has_the_server() -> None:
+    command, args = loop.xrpl_command()
+
+    assert args == ["-m", "xrpl_mcp_server"]
+    if _real_ledger_python() is None:
+        pytest.skip("no interpreter with xrpl_mcp_server and mcp<2 (set XRPL_MCP_PYTHON)")
+    assert os.path.exists(command)
+
+
+@pytest.mark.asyncio
+async def test_the_real_ledger_server_answers_initialize_and_lists_the_reads() -> None:
+    if _real_ledger_python() is None:
+        pytest.skip("no interpreter with xrpl_mcp_server and mcp<2 (set XRPL_MCP_PYTHON)")
+    async with xrpl_server("https://s.altnet.rippletest.net:51234/") as server:
+        names = await tool_names(server)
+
+    assert names == sorted(XRPL_READ_TOOLS)
+    assert "get_book_offers" in names
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_market_server_is_loud_in_the_journal(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelStep(output=[assistant_message("holding")])])
+    settings = settings_for(tmp_path)
+    journal = books.Journal(settings.loop.journal_md, settings.loop.journal_jsonl)
+    async with fake_server(tmp_path, {}) as merkl:
+        harness = Harness(
+            settings,
+            journal=journal,
+            server=merkl,
+            model=model,
+            unavailable=["ledger server unavailable: Connection closed"],
+        )
+        entry = await harness.one_cycle()
+
+    assert entry.headline.startswith("ledger server unavailable: Connection closed.")

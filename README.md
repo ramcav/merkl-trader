@@ -243,8 +243,9 @@ names), and it mounts four tool sources:
   just enforced by the SDK instead of by hand. `merkl-mcp` itself refuses a
   second proposal while one is still waiting on a person, so the cap holds
   even across a restart.
-- **`xrpl-mcp-server`** (lgcarrier's, pip `iflow-mcp_lgcarrier-xrpl-mcp-server`)
-  over stdio, with `XRPL_NODE_URL` taken from `[rail].json_rpc_url` — the order
+- **The XRPL ledger server** (lgcarrier's, pip `iflow-mcp_lgcarrier-xrpl-mcp-server`,
+  run as `python -m xrpl_mcp_server`; it needs `mcp<2`, so point
+  `XRPL_MCP_PYTHON` at an interpreter that has it; the image does) over stdio, with `XRPL_NODE_URL` taken from `[rail].json_rpc_url` — the order
   book. It is tool-filtered to four reads: `get_book_offers`,
   `get_account_info`, `get_account_lines`, `get_transaction_info`. Its
   `submit_transaction` is never visible to the agent.
@@ -254,8 +255,8 @@ names), and it mounts four tool sources:
 
 The agent has no market tool of our own: the book comes from the ledger
 server, reference prices from CoinGecko, news from web search, and money only
-through Merkl. A market server that is down at start-up is dropped with a
-note on stderr, not fatal.
+through Merkl. A market server that is down at start-up is dropped, not fatal, and every
+journal line then begins "ledger server unavailable: <reason>".
 
 This process is thin by design: unlike `trader.py`, it keeps no local
 `State`, no nonce, no in-flight bookkeeping, and no compute-bill accrual — the

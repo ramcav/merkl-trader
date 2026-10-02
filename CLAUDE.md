@@ -98,7 +98,7 @@ tool loop. It requires `[model].provider = "openai"` in the same
 `trader.toml` (a plain `ConfigError` otherwise) and mounts four tool sources on
 an `agents.Agent` (phase 24): `WebSearchTool()`, `merkl-mcp` over stdio
 (`MCPServerStdio`, command `merkl-mcp`, `MERKL_AGENT_DIR` set to the config's
-own directory; money and evidence only), `xrpl-mcp-server` over stdio
+own directory; money and evidence only), `python -m xrpl_mcp_server` over stdio
 (`XRPL_NODE_URL` from `[rail].json_rpc_url`, `tool_filter` allowlist of
 `get_book_offers`, `get_account_info`, `get_account_lines`,
 `get_transaction_info` — `submit_transaction` is never visible) and CoinGecko's
