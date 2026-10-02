@@ -2,13 +2,14 @@
 
 Phase 23, section B — "Merkl as a tool server, and an agent with real
 tooling." ``trader.py`` reads the ledger itself and holds the receipt builder
-itself; this process holds neither. The market, the treasury, the receipts and
+itself; this process holds neither. The treasury, the receipts, the verifier and
 the one-proposal-at-a-time rule all live behind ``merkl-mcp``
 (https://github.com/ramcav/merkl-mcp), mounted over stdio as a tool server any
 harness can use — the same shared contract a Claude Code or Hermes mount would
 see. What is left here is thin on purpose: wake up, hand the model its mandate
-and its tools (``merkl-mcp`` for anything money-shaped, ``WebSearchTool`` for
-the outside world), wait for at most one proposal or a hold, journal it,
+and its tools (``merkl-mcp`` for anything money-shaped, a read-filtered
+``xrpl-mcp-server`` for the order book, CoinGecko's MCP for reference prices,
+``WebSearchTool`` for news), wait for at most one proposal or a hold, journal it,
 sleep. There is no local ``State``, no nonce, no in-flight bookkeeping — that
 crash-safety already lives behind ``merkl-mcp``'s own ``ReceiptBuilder``,
 exactly as it does for the no-framework loop in ``trader.py``. There is also
@@ -34,6 +35,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -50,7 +52,12 @@ from agents import (
 )
 from agents.exceptions import AgentsException, MaxTurnsExceeded
 from agents.items import RunItem, ToolCallItem, ToolCallOutputItem
-from agents.mcp import MCPServer, MCPServerStdio
+from agents.mcp import (
+    MCPServer,
+    MCPServerStdio,
+    MCPServerStreamableHttp,
+    create_static_tool_filter,
+)
 
 from merkl_trader import config as configuration
 from merkl_trader import ledger as books
@@ -58,11 +65,26 @@ from merkl_trader import ledger as books
 MERKL_MCP_COMMAND: Final = "merkl-mcp"
 """The console script ``merkl-mcp``'s own ``pyproject.toml`` installs."""
 
+XRPL_MCP_COMMAND: Final = "xrpl-mcp-server"
+"""lgcarrier's ``xrpl-mcp-server`` (pip ``iflow-mcp_lgcarrier-xrpl-mcp-server``)."""
+
+XRPL_READ_TOOLS: Final = (
+    "get_book_offers",
+    "get_account_info",
+    "get_account_lines",
+    "get_transaction_info",
+)
+"""The only tools of the ledger server the agent may see. Its
+``submit_transaction`` is never listed: money moves only through Merkl."""
+
+COINGECKO_MCP_URL: Final = "https://mcp.api.coingecko.com/mcp"
+"""CoinGecko's official remote MCP server, keyless."""
+
 PROPOSAL_TOOLS: Final = ("propose_payment", "propose_swap")
 
 MAX_TURNS: Final = 10
 """Tool-call turns before a cycle is cut off as a hold. Generous: a
-get_treasury, a get_market, a read_receipts and a web search or two, still
+get_treasury, a get_book_offers, a read_receipts and a web search or two, still
 well short of ever needing it in practice — the real ceiling is
 ``stop_at_tool_names`` ending the run the moment either action tool answers."""
 
@@ -119,13 +141,15 @@ get_treasury are where you would have to look.
 
 Doing nothing is a real action and is often the right one.
 
-Your tools. get_treasury, get_market, read_receipts and pending_approval are \
-reads — call as many as you need, in any order. propose_payment and \
-propose_swap are the only ways to touch money, and calling either ends your \
-turn immediately: there is no second action this cycle, so make it the one \
-you meant. Web search is for news and reference prices — get_market's own \
-read of the ledger's book is the only source for what a trade would actually \
-cost.
+Your tools, and where each kind of fact comes from. Money only goes through \
+Merkl: get_treasury, read_receipts, verify_receipt and pending_approval are \
+reads, and propose_payment and propose_swap are the only ways to touch \
+money; calling either ends your turn immediately: there is no second action \
+this cycle, so make it the one you meant. The order book comes from the \
+ledger server (get_book_offers, plus get_account_info, get_account_lines and \
+get_transaction_info): it is the only source for what a trade would actually \
+cost. Reference prices come from CoinGecko, when it is mounted. News comes \
+from web search. Call as many reads as you need, in any order.
 
 What you cannot see. A policy your operator signed sits between you and the \
 ledger, held by a co-signer you do not control. Nothing here contains its \
@@ -150,7 +174,7 @@ Amounts are decimal strings, never numbers: "12.5", not 12.5."""
 def _situation(now: str, *, wake_minutes: int) -> str:
     return (
         f"It is {now}. You wake up every {wake_minutes} minutes. Call get_treasury "
-        "and get_market before you decide anything; call pending_approval first if "
+        "and get_book_offers before you decide anything; call pending_approval first if "
         "an earlier proposal might still be open, and read_receipts if the recent "
         "past would change your mind."
     )
@@ -179,6 +203,34 @@ def mcp_server(bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND) -> MCPServ
     )
 
 
+def xrpl_server(
+    json_rpc_url: str, *, command: str = XRPL_MCP_COMMAND, args: Sequence[str] = ()
+) -> MCPServerStdio:
+    """The ledger server over stdio, pointed at ``[rail].json_rpc_url`` and
+    tool-filtered to reads: ``submit_transaction`` is never visible."""
+    return MCPServerStdio(
+        params={"command": command, "args": list(args), "env": {"XRPL_NODE_URL": json_rpc_url}},
+        name="xrpl-mcp-server",
+        client_session_timeout_seconds=30,
+        tool_filter=create_static_tool_filter(allowed_tool_names=list(XRPL_READ_TOOLS)),
+    )
+
+
+def coingecko_server(url: str = COINGECKO_MCP_URL) -> MCPServerStreamableHttp:
+    """CoinGecko's remote MCP server, keyless, for reference prices."""
+    return MCPServerStreamableHttp(
+        params={"url": url}, name="coingecko", client_session_timeout_seconds=30
+    )
+
+
+def market_servers(settings: configuration.Config) -> list[MCPServer]:
+    """The read-only servers mounted beside merkl-mcp."""
+    servers: list[MCPServer] = [xrpl_server(settings.rail.json_rpc_url)]
+    if settings.harness.coingecko:
+        servers.append(coingecko_server())
+    return servers
+
+
 # --------------------------------------------------------------------------- #
 # One process: one config, one merkl-mcp server, one journal.
 # --------------------------------------------------------------------------- #
@@ -191,12 +243,14 @@ class Harness:
         *,
         journal: books.Journal,
         server: MCPServer,
+        extra_servers: Sequence[MCPServer] = (),
         model: Any | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.settings = settings
         self.journal = journal
         self.server = server
+        self.extra_servers = tuple(extra_servers)
         self._model = model
         self.clock = clock or SystemClock()
         self.cycle_count = 0
@@ -257,7 +311,7 @@ class Harness:
             model=self._model or self.settings.model.name,
             model_settings=ModelSettings(max_tokens=self.settings.model.max_tokens),
             tools=[WebSearchTool()],
-            mcp_servers=[self.server],
+            mcp_servers=[self.server, *self.extra_servers],
             tool_use_behavior={"stop_at_tool_names": list(PROPOSAL_TOOLS)},
         )
         situation = _situation(now, wake_minutes=max(1, self.settings.loop.interval_seconds // 60))
@@ -473,11 +527,25 @@ async def _run(arguments: argparse.Namespace) -> int:
     set_tracing_disabled(True)  # a receipt is this agent's public record; a trace is not it
 
     server = mcp_server(_bundle_dir(arguments.config))
-    async with server:
+    extra = market_servers(settings)
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(server)
+        connected: list[MCPServer] = []
+        for mounted in extra:
+            try:  # a market source that is down is a thinner cycle, not a dead agent
+                await stack.enter_async_context(mounted)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"harness: {mounted.name} unavailable, continuing without: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                connected.append(mounted)
         harness = Harness(
             settings,
             journal=books.Journal(settings.loop.journal_md, settings.loop.journal_jsonl),
             server=server,
+            extra_servers=connected,
         )
         return await harness.run(once=bool(arguments.once))
 
@@ -504,8 +572,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "MAX_TURNS",
     "PROPOSAL_TOOLS",
+    "XRPL_READ_TOOLS",
     "Harness",
+    "coingecko_server",
+    "market_servers",
     "main",
     "mcp_server",
     "system_prompt",
+    "xrpl_server",
 ]

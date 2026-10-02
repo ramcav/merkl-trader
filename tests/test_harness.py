@@ -168,7 +168,7 @@ async def test_only_one_proposal_reaches_the_server_per_cycle(tmp_path: Path) ->
                     )
                 ]
             ),
-            ModelStep(output=[function_call("get_market", {}, call_id="c2")]),  # never run
+            ModelStep(output=[function_call("read_receipts", {}, call_id="c2")]),  # never run
         ]
     )
     script = {"propose": {"outcome": "settled", "tx_hash": "abc"}}

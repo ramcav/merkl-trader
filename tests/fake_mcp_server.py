@@ -13,8 +13,7 @@ startup):
 
     {
       "treasury": {...},           # get_treasury's answer
-      "market": {...},             # get_market's answer, whatever the input
-      "receipts": [...],           # read_receipts's answer
+        "receipts": [...],           # read_receipts's answer
       "propose": {...},            # what propose_payment/propose_swap answers
       "pending_sequence": [...]    # pending_approval's answers, one per call;
                                     # the last one repeats once exhausted
@@ -47,14 +46,6 @@ _DEFAULT_TREASURY: dict[str, Any] = {
     "policy_version": "2026.09.16",
     "signer_health": "ok",
     "pending_with_a_person": False,
-}
-
-_DEFAULT_MARKET: dict[str, Any] = {
-    "pair": "XRP/RLUSD",
-    "best_bid": "0.520000",
-    "best_ask": "0.530000",
-    "mid": "0.525000",
-    "sizes": {},
 }
 
 _DEFAULT_PROPOSE: dict[str, Any] = {
@@ -92,13 +83,8 @@ def get_treasury() -> dict[str, Any]:
 
 
 @server.tool()
-def get_market(
-    base: str = "XRP",
-    quote_code: str = "RLUSD",
-    quote_issuer: str = "",
-    sizes: list[str] | None = None,
-) -> dict[str, Any]:
-    return dict(_SCRIPT.get("market") or _DEFAULT_MARKET)
+def verify_receipt(receipt_id: str) -> dict[str, Any]:
+    return {"receipt_id": receipt_id, "verdict": "Nothing was contradicted. Every check ran."}
 
 
 @server.tool()
