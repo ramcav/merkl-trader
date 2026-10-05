@@ -23,6 +23,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from xrpl.core.addresscodec import is_valid_classic_address
+
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 TRADER_HOME_ENV = "MERKL_TRADER_HOME"
@@ -158,6 +160,14 @@ class BillConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class HarnessConfig:
+    """``[harness]`` — optional; only ``python -m merkl_trader.harness`` reads it."""
+
+    coingecko: bool = True
+    """Mount the official keyless CoinGecko MCP server for reference prices."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Config:
     agent: AgentConfig
     treasury: TreasuryConfig
@@ -168,6 +178,7 @@ class Config:
     model: ModelConfig
     loop: LoopConfig
     bill: BillConfig
+    harness: HarnessConfig = dataclasses.field(default_factory=HarnessConfig)
 
 
 # -- reading ---------------------------------------------------------------- #
@@ -179,7 +190,7 @@ def load(path: Path | str) -> Config:
     try:
         raw = tomllib.loads(given.read_text())
     except OSError as exc:
-        raise ConfigError(f"cannot read {path}: {exc}") from exc
+        raise permission_error(given, exc) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path} is not valid TOML: {exc}") from exc
     return parse(raw, base_dir=given.parent)
@@ -257,8 +268,28 @@ def parse(raw: dict[str, Any], *, base_dir: Path | None = None) -> Config:
             interval_seconds=_int(loop, "interval_seconds", "loop"),
             home=_loop_home(loop, base_dir),
         ),
-        bill=BillConfig(bill_day=day, operator=_string(bill, "operator", "bill")),
+        bill=BillConfig(bill_day=day, operator=_operator(bill)),
+        harness=_harness(raw.get("harness", {})),
     )
+
+
+def _operator(bill: dict[str, Any]) -> str:
+    operator = _string(bill, "operator", "bill")
+    if not is_valid_classic_address(operator):
+        raise ConfigError(
+            f"bill.operator {operator!r} is not a valid classic XRPL address "
+            "(replace the placeholder with the operator's r... address)"
+        )
+    return operator
+
+
+def _harness(table: Any) -> HarnessConfig:
+    if not isinstance(table, dict):
+        raise ConfigError("[harness] must be a table")
+    coingecko = table.get("coingecko", True)
+    if not isinstance(coingecko, bool):
+        raise ConfigError("harness.coingecko must be true or false")
+    return HarnessConfig(coingecko=coingecko)
 
 
 def _notary(table: dict[str, Any], base_dir: Path) -> NotaryConfig:
@@ -298,10 +329,11 @@ def _model_provider(table: dict[str, Any]) -> str:
 
 def read_secret_file(path: Path) -> str:
     """One line out of a 0600 file. Never logged, never echoed."""
+    expanded = path.expanduser()
     try:
-        return path.expanduser().read_text().strip()
+        return expanded.read_text().strip()
     except OSError as exc:
-        raise ConfigError(f"cannot read the secret at {path}: {exc}") from exc
+        raise permission_error(expanded, exc) from exc
 
 
 def read_secret_env(name: str) -> str:
@@ -310,6 +342,36 @@ def read_secret_env(name: str) -> str:
     if not value:
         raise ConfigError(f"${name} is not set")
     return value
+
+
+def read_bundle_bytes(path: Path) -> bytes:
+    """The raw bytes of a bundle file that is not text — today, only the agent's
+    Ed25519 key. Same permission hint as :func:`read_secret_file`; kept separate
+    because a key is read as bytes, not stripped text."""
+    expanded = path.expanduser()
+    try:
+        return expanded.read_bytes()
+    except OSError as exc:
+        raise permission_error(expanded, exc) from exc
+
+
+def permission_error(path: Path, exc: OSError) -> ConfigError:
+    """An unreadable bundle file, worded for whoever just stood the container up.
+
+    The image runs as uid 10002 and every secret `merkl treasury init` writes is
+    0600 (README's "five files"), so a bind-mounted bundle owned by somebody
+    else's uid is the single most common way this first fails — and the plain
+    ``PermissionError`` gives no hint what to do about it. Naming the fix in the
+    same line beats making the operator go find it in the README. Any other
+    ``OSError`` (missing file, a directory where a file was expected) is left as
+    the plain message it already was.
+    """
+    if isinstance(exc, PermissionError):
+        return ConfigError(
+            f"cannot read {path}: {exc}. The image runs as uid 10002 and every file "
+            f"in the bundle is 0600 — fix with `chown -R 10002:10002 {path.parent}`."
+        )
+    return ConfigError(f"cannot read {path}: {exc}")
 
 
 # -- primitives ------------------------------------------------------------- #
@@ -416,6 +478,8 @@ __all__ = [
     "TreasuryConfig",
     "load",
     "parse",
+    "permission_error",
+    "read_bundle_bytes",
     "read_secret_env",
     "read_secret_file",
 ]

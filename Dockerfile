@@ -23,7 +23,14 @@ LABEL org.opencontainers.image.source="https://github.com/ramcav/merkl-trader" \
       org.opencontainers.image.description="Merkl reference trading agent"
 
 COPY . /src
-RUN pip install --no-cache-dir /src && rm -rf /src
+RUN pip install --no-cache-dir /src "merkl-mcp @ git+https://github.com/ramcav/merkl-mcp@v0.1.0" \
+    && rm -rf /src
+
+# The ledger server (run as `python -m xrpl_mcp_server`; its console script is
+# broken) needs mcp<2, so it gets its own venv; the harness finds it through
+# XRPL_MCP_PYTHON.
+RUN python -m venv /opt/xrpl \
+    && /opt/xrpl/bin/pip install --no-cache-dir iflow-mcp_lgcarrier-xrpl-mcp-server "mcp<2"
 
 # Unprivileged from the start: unlike the signer image, there is no
 # host-owned bind mount to chown before this starts — /agent arrives
@@ -36,6 +43,7 @@ USER merkl-trader
 # PYTHONUNBUFFERED so the two journal lines each cycle reach `docker logs`
 # when they are printed rather than when the process ends.
 ENV MERKL_TRADER_HOME=/var/lib/merkl-trader \
+    XRPL_MCP_PYTHON=/opt/xrpl/bin/python \
     PYTHONUNBUFFERED=1
 
 VOLUME ["/var/lib/merkl-trader"]
