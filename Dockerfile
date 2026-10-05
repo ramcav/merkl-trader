@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.source="https://github.com/ramcav/merkl-trader" \
       org.opencontainers.image.description="Merkl reference trading agent"
 
 COPY . /src
-RUN pip install --no-cache-dir /src "merkl-mcp @ git+https://github.com/ramcav/merkl-mcp@v0.1.0" \
+RUN pip install --no-cache-dir /src "merkl-mcp @ https://github.com/ramcav/merkl-mcp/archive/refs/tags/v0.1.0.tar.gz" \
     && rm -rf /src
 
 # The ledger server (run as `python -m xrpl_mcp_server`; its console script is
