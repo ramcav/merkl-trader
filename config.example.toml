@@ -108,9 +108,15 @@ interval_seconds = 900
 # journal.md, journal.jsonl, state.json and receipts/ all live here.
 home = "~/.merkl/trader"
 
+[harness]
+# Only `python -m merkl_trader.harness` reads this table (optional).
+# Mount CoinGecko's keyless remote MCP server for reference prices.
+coingecko = true
+
 [bill]
 # Once a week the agent proposes to pay the operator for the tokens it burned,
 # converted at the price it can see. If that payment is refused, or the treasury
 # cannot cover it, the agent writes "out of business" and exits non-zero.
 bill_day = "monday"
+# Must be a valid classic address (r...); the config refuses this placeholder.
 operator = "rOPERATORADDRESSGOESHERE00000000000"
