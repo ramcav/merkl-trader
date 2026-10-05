@@ -20,11 +20,14 @@ merkl_trader/
   market.py             what the ledger says
   decide.py             what the model says — the part you replace
   ledger.py             the agent's own books: state, the compute bill, journal
-  config.py             one TOML file, validated once; $MERKL_TRADER_HOME
-                         overrides [loop].home for the Docker image
+  config.py             one TOML file, validated once; every relative path in
+                         it resolves against trader.toml's own directory, not
+                         the process's cwd; $MERKL_TRADER_HOME overrides
+                         [loop].home for the Docker image
 tests/test_trader.py    end to end against merkl-sdk's in-memory rail, a real
                          signer and a scripted model
-tests/test_config.py    the $MERKL_TRADER_HOME override
+tests/test_config.py    the $MERKL_TRADER_HOME override and path resolution
+                         (relative, absolute, ~)
 config.example.toml     a worked example, commented — copy to trader.toml
 Dockerfile              python -m merkl_trader, read-only /agent
 ```
