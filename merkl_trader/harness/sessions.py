@@ -9,6 +9,7 @@ session. The model never sees or supplies those arguments.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import time
@@ -46,39 +47,67 @@ class CycleRecorder(RunHooks):
         self.session = session
         self.last_action_id: str | None = None
         self._started: dict[str, float] = {}
+        self._lock = asyncio.Lock()
+        """One recording at a time: each action is posted after the previous one
+        landed, so each gets the next leaf index, in the order the calls finished."""
+        self._pending = 0
+        self._quiet = asyncio.Condition()
 
     async def on_tool_start(self, context: Any, agent: Any, tool: Any) -> None:
         self._started[_call_id(context)] = time.monotonic()
+        if _tool_name(context, tool) not in PROPOSAL_TOOLS:
+            self._pending += 1
+
+    async def settled(self) -> None:
+        """Wait until every recorded tool call has been posted (so the session's
+        ``action_count`` is exact before a proposal is sent)."""
+        async with self._quiet:
+            await self._quiet.wait_for(lambda: self._pending == 0)
+
+    async def _finished(self) -> None:
+        async with self._quiet:
+            self._pending -= 1
+            self._quiet.notify_all()
 
     async def on_tool_end(self, context: Any, agent: Any, tool: Any, result: Any) -> None:
-        name = str(getattr(context, "tool_name", "") or getattr(tool, "name", "tool"))
+        name = _tool_name(context, tool)
         output = clip(result)
-        if name in PROPOSAL_TOOLS and '"error"' not in output:
-            return  # the receipt is this call's action; the builder records it
-        started = self._started.pop(_call_id(context), time.monotonic())
-        await self.record(
-            name,
-            _arguments(context),
-            output,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
+        counted = name not in PROPOSAL_TOOLS
+        try:
+            if name in PROPOSAL_TOOLS and '"error"' not in output:
+                return  # the receipt is this call's action; the builder records it
+            started = self._started.pop(_call_id(context), time.monotonic())
+            await self.record(
+                name,
+                _arguments(context),
+                output,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+        finally:
+            if counted:
+                await self._finished()
 
     async def record(
         self, tool_name: str, input_data: Any, output_data: Any, *, duration_ms: int = 0
     ) -> None:
-        try:
-            recorded = await self.session.record_action(
-                tool_name=tool_name,
-                input_data=input_data,
-                output_data=output_data,
-                duration_ms=duration_ms,
-                depends_on=[self.last_action_id] if self.last_action_id else [],
-            )
-        except Exception as exc:  # noqa: BLE001 - recording never ends a cycle
-            print(f"harness: could not record {tool_name}: {exc}", file=sys.stderr)
-            return
-        if isinstance(recorded, dict) and recorded.get("action_id"):
-            self.last_action_id = str(recorded["action_id"])
+        async with self._lock:
+            try:
+                recorded = await self.session.record_action(
+                    tool_name=tool_name,
+                    input_data=input_data,
+                    output_data=output_data,
+                    duration_ms=duration_ms,
+                    depends_on=[self.last_action_id] if self.last_action_id else [],
+                )
+            except Exception as exc:  # noqa: BLE001 - recording never ends a cycle
+                print(f"harness: could not record {tool_name}: {exc}", file=sys.stderr)
+                return
+            if isinstance(recorded, dict) and recorded.get("action_id"):
+                self.last_action_id = str(recorded["action_id"])
+
+
+def _tool_name(context: Any, tool: Any) -> str:
+    return str(getattr(context, "tool_name", "") or getattr(tool, "name", "tool"))
 
 
 def _call_id(context: Any) -> str:
@@ -103,6 +132,7 @@ class SessionedServer(MCPServerStdio):
     ) -> Any:
         recorder = self.recorder
         if recorder is not None and tool_name in PROPOSAL_TOOLS and recorder.session.session_id:
+            await recorder.settled()
             arguments = {
                 **(arguments or {}),
                 "session_id": recorder.session.session_id,

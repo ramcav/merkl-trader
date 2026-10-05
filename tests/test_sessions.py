@@ -32,9 +32,13 @@ class FakeSession:
         self.sealed = True
 
     async def record_action(self, **kwargs: Any) -> dict[str, Any]:
-        self.actions.append(kwargs)
-        self.action_count += 1
-        return {"action_id": f"act-{self.action_count}"}
+        # The real notary assigns the leaf index when the action lands; the yield
+        # makes an unserialized recorder read the same index twice.
+        index = self.action_count
+        await asyncio.sleep(0.01)
+        self.action_count = index + 1
+        self.actions.append({**kwargs, "leaf_index": index})
+        return {"action_id": f"act-{index + 1}"}
 
 
 class FakeClient:
@@ -155,3 +159,29 @@ def test_outputs_are_cut_to_four_kilobytes_and_the_goal_is_the_first_sentence() 
     assert len(sessions.clip("x" * 10_000)) < 4_200
     assert sessions.clip({"a": 1}) == '{"a": 1}'
     assert sessions.goal_of("Grow the treasury. Prefer cash.") == "Grow the treasury."
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_get_consecutive_indexes_and_the_proposal_waits(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            ModelStep(
+                output=[
+                    function_call("pending_approval", {}, call_id="c1"),
+                    function_call("read_receipts", {}, call_id="c2"),
+                    function_call("get_treasury", {}, call_id="c3"),
+                ]
+            ),
+            ModelStep(output=[function_call("propose_swap", SWAP, call_id="c4")]),
+        ]
+    )
+    client = FakeClient()
+
+    entry = await cycle(tmp_path, model, {"propose": {"outcome": "settled"}}, client)
+
+    (session,) = client.sessions
+    assert sorted(a["leaf_index"] for a in session.actions) == [0, 1, 2]
+    assert len({a["leaf_index"] for a in session.actions}) == 3
+    assert '"session_action_count": 3' in entry.headline
