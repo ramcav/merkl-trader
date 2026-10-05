@@ -258,6 +258,13 @@ def mcp_server(
     env = {"MERKL_AGENT_DIR": str(bundle_dir)}
     if trader_home is not None:  # where the journal's per-cycle costs live: the bill's source
         env["MERKL_TRADER_HOME"] = str(trader_home)
+    # The two places merkl-mcp writes: its own state and the receipt store. An
+    # operator who moved them (the image does, onto the trader's volume) must
+    # have that reach the subprocess, or it falls back to a path it cannot write.
+    for name in ("MERKL_MCP_STATE", "MERKL_RECEIPT_DIR"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            env[name] = value
     return MCPServerStdio(
         params={"command": command, "env": env},
         name="merkl-mcp",

@@ -349,3 +349,15 @@ async def test_each_cycle_journals_its_compute_cost(tmp_path: Path) -> None:
         1_000_000
     )
     assert entry.cost_usd == expected
+
+
+def test_merkl_mcp_subprocess_is_told_where_state_and_receipts_live(monkeypatch, tmp_path):
+    from merkl_trader.harness import loop as harness_loop
+
+    monkeypatch.setenv("MERKL_MCP_STATE", "/var/lib/merkl-trader/mcp")
+    monkeypatch.setenv("MERKL_RECEIPT_DIR", "/var/lib/merkl-trader/receipts")
+    server = harness_loop.mcp_server(tmp_path, trader_home=tmp_path)
+    env = server.params.env
+    assert env["MERKL_MCP_STATE"] == "/var/lib/merkl-trader/mcp"
+    assert env["MERKL_RECEIPT_DIR"] == "/var/lib/merkl-trader/receipts"
+    assert env["MERKL_AGENT_DIR"] == str(tmp_path)
