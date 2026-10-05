@@ -40,6 +40,12 @@ Releases are cut by pushing a `v<version>` tag; see
 
 ### Fixed
 
+- **A refused or unaffordable compute bill never ends the process.** It is journaled
+  ("bill refused: <rule>; retrying on <time>"), stays owed and is retried at most
+  once an hour; the same intent (destination, amount within 1%) is never refused-and-filed
+  twice inside an hour, across restarts; "out of business" idles in place and says so
+  hourly instead of exiting, so a restart policy cannot turn it into a flood of receipts.
+
 - **A placeholder `[bill].operator` is refused at load.** `config.load()` now
   checks it is a valid classic XRPL address and names the field, instead of
   failing when the bill comes due.
@@ -62,6 +68,12 @@ Releases are cut by pushing a `v<version>` tag; see
 ## [0.1.1] - 2026-09-16
 
 ### Fixed
+
+- **A refused or unaffordable compute bill never ends the process.** It is journaled
+  ("bill refused: <rule>; retrying on <time>"), stays owed and is retried at most
+  once an hour; the same intent (destination, amount within 1%) is never refused-and-filed
+  twice inside an hour, across restarts; "out of business" idles in place and says so
+  hourly instead of exiting, so a restart policy cannot turn it into a flood of receipts.
 
 - **Relative paths in the bundle now resolve against the config file, not
   the process's working directory.** `key_file`, `wallet_file`,

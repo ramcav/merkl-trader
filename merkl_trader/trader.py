@@ -32,7 +32,7 @@ import asyncio
 import dataclasses
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
@@ -75,8 +75,17 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-class OutOfBusiness(Exception):
-    """The agent cannot pay for itself. There is no recovering from this in code."""
+class ProposalSuppressed(Exception):
+    """The same intent was refused inside the last hour; filing it again would only
+    add another identical refused receipt to the notary."""
+
+
+RETRY_AFTER: Final = timedelta(hours=1)
+"""A refused bill, a refused intent and an out-of-business note all wait at
+least this long before the agent speaks to the signer, the notary or its
+journal about it again — however short the wake-up interval is."""
+
+SAME_INTENT_TOLERANCE: Final = Decimal("0.01")
 
 
 # --------------------------------------------------------------------------- #
@@ -134,6 +143,8 @@ class Cycle:
 
     entry: books.Entry
     fatal: str = ""
+    quiet: bool = False
+    """Nothing new to say: the run loop does not journal it."""
 
 
 class Trader:
@@ -209,7 +220,9 @@ class Trader:
                 outcome="escalated",
             )
 
-        if self.state.bill.due(_moment(now), self.settings.bill.bill_day):
+        if self.state.broke_noted_at or self.state.bill.due(
+            _moment(now), self.settings.bill.bill_day
+        ):
             return await self._pay_the_bill(now, snapshot, price, runway)
 
         return await self._trade(now, snapshot, runway, burn)
@@ -332,7 +345,32 @@ class Trader:
         price: Decimal | None,
         runway: Decimal | None,
     ) -> Cycle:
-        """Pay the operator for the tokens this agent has burned. One action."""
+        """Pay the operator for the tokens this agent has burned. One action.
+
+        A refusal never ends the process: the bill stays owed and is retried at
+        most once an hour. Being unable to cover it at all stops all proposals
+        but keeps the process alive, saying so once an hour."""
+        moment = _moment(now)
+        if self.state.broke_noted_at and moment < _moment(self.state.broke_noted_at) + RETRY_AFTER:
+            return self._entry(
+                now,
+                snapshot,
+                runway,
+                headline="Out of business; idle.",
+                action="bill",
+                outcome="none",
+                quiet=True,
+            )
+        if self.state.bill_retry_at and moment < _moment(self.state.bill_retry_at):
+            return self._entry(
+                now,
+                snapshot,
+                runway,
+                headline=f"The bill is still owed; retrying at {self.state.bill_retry_at}.",
+                action="bill",
+                outcome="none",
+                quiet=True,
+            )
         owed = self.state.bill.accrued_usd
         if price is None:
             return self._entry(
@@ -349,10 +387,20 @@ class Trader:
         amount = books.bill_in_xrp(owed, price)
         held = snapshot.balance(snapshot.base)
         if amount > held:
-            raise OutOfBusiness(
-                f"the compute bill is {format_decimal(amount)} {snapshot.base} and the "
-                f"treasury holds {format_decimal(held)}."
+            self.state.broke_noted_at = now
+            return self._entry(
+                now,
+                snapshot,
+                runway,
+                headline=(
+                    f"**Out of business.** The compute bill is {format_decimal(amount)} "
+                    f"{snapshot.base} and the treasury holds {format_decimal(held)}. Staying "
+                    "alive and idle: nothing will be proposed; this is said again in an hour."
+                ),
+                action="bill",
+                outcome="none",
             )
+        self.state.broke_noted_at = ""
         if self.dry_run:
             return self._entry(
                 now,
@@ -388,6 +436,16 @@ class Trader:
                 source="mandate",
                 receipt_id=bill_receipt_id,
             )
+        except ProposalSuppressed as exc:
+            return self._entry(
+                now,
+                snapshot,
+                runway,
+                headline=f"Not proposing the compute bill: {exc}",
+                action="bill",
+                outcome="none",
+                quiet=True,
+            )
         except ProposalFailed as exc:
             return self._entry(
                 now,
@@ -399,6 +457,7 @@ class Trader:
             )
         if outcome.settled:
             self.state.bill.settled(_moment(now).date().isoformat())
+            self.state.bill_retry_at = ""
             self._save()
             return self._entry(
                 now,
@@ -425,9 +484,16 @@ class Trader:
                 outcome="escalated",
                 receipt_id=outcome.envelope.receipt_id,
             )
-        raise OutOfBusiness(
-            f"the compute bill was refused: {outcome.reason or outcome.outcome}. "
-            f"receipt {outcome.envelope.receipt_id}"
+        retry_at = (moment + RETRY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.state.bill_retry_at = retry_at
+        return self._entry(
+            now,
+            snapshot,
+            runway,
+            headline=f"bill refused: {_refusal(outcome)}; retrying on {retry_at}",
+            action="bill",
+            outcome="denied",
+            receipt_id=outcome.envelope.receipt_id,
         )
 
     # -- step 5: the trade -------------------------------------------------- #
@@ -493,6 +559,8 @@ class Trader:
                 reasoning=decision.reasoning,
                 source="mandate",
             )
+        except ProposalSuppressed as exc:
+            return entry(f"Did nothing: {exc}", "none")
         except ProposalFailed as exc:
             return entry(f"could not propose: {exc}", "none")
         if outcome.settled:
@@ -529,6 +597,7 @@ class Trader:
         caller journals a hold with the reason and the loop goes on. A bill
         stays in flight (one id) until a receipt exists; anything else is
         cleared, since nothing was sent."""
+        self._refuse_to_refile(now, intent)
         receipt_id = receipt_id or self._receipt_id(f"{kind}-{self.state.cycle}")
         self.state.in_flight = books.InFlight(
             receipt_id=receipt_id, nonce=intent.nonce, kind=kind, at=now
@@ -553,6 +622,8 @@ class Trader:
             raise ProposalFailed(_flat(str(exc) or type(exc).__name__)) from exc
         self.state.in_flight = None
         self.state.lesson = "" if outcome.settled else _lesson(outcome)
+        if not outcome.settled and outcome.pending_escalation is None:
+            self._remember_refusal(now, intent)
         if outcome.pending_escalation is not None:
             self.state.pending = books.Pending(
                 challenge=str(outcome.pending_escalation["challenge"]),
@@ -581,6 +652,33 @@ class Trader:
             )
         self._save()
         return outcome
+
+    # -- never refile the same refusal --------------------------------------- #
+
+    def _refuse_to_refile(self, now: str, intent: Intent) -> None:
+        """At most one refused receipt per intent (same destination, amount within
+        1%) per hour, however often the loop or the restart policy comes round."""
+        moment = _moment(now)
+        amount = Decimal(intent.outflow.value)
+        for item in self.state.refused:
+            then = _moment(item["at"])
+            if item["destination"] != intent.destination or moment - then >= RETRY_AFTER:
+                continue
+            earlier = Decimal(item["amount"])
+            if abs(amount - earlier) <= earlier * SAME_INTENT_TOLERANCE:
+                raise ProposalSuppressed(
+                    f"the same intent was refused at {item['at']}; not filing it again "
+                    "within the hour."
+                )
+
+    def _remember_refusal(self, now: str, intent: Intent) -> None:
+        moment = _moment(now)
+        kept = [
+            item for item in self.state.refused if moment - _moment(item["at"]) < 2 * RETRY_AFTER
+        ]
+        kept.append({"destination": intent.destination, "amount": intent.outflow.value, "at": now})
+        self.state.refused = kept
+        self._save()
 
     # -- intents ------------------------------------------------------------ #
 
@@ -716,9 +814,11 @@ class Trader:
         receipt_id: str | None = None,
         usage: decisions.Usage | None = None,
         cost: Decimal = Decimal(0),
+        quiet: bool = False,
     ) -> Cycle:
         self._save()
         return Cycle(
+            quiet=quiet,
             entry=books.Entry(
                 at=now,
                 cycle=self.state.cycle,
@@ -731,7 +831,7 @@ class Trader:
                 tokens_in=usage.input_tokens if usage else 0,
                 tokens_out=usage.output_tokens if usage else 0,
                 cost_usd=cost,
-            )
+            ),
         )
 
     def _save(self) -> None:
@@ -744,12 +844,6 @@ class Trader:
         while True:
             try:
                 result = await self.cycle()
-            except OutOfBusiness as exc:
-                self.journal.note(
-                    self.clock.now(), f"**Out of business.** {exc} Nothing further will run."
-                )
-                print(f"out of business: {exc}", file=sys.stderr, flush=True)
-                return 1
             except markets.MarketError as exc:
                 print(f"could not read the market: {exc}", file=sys.stderr, flush=True)
                 if once:
@@ -764,9 +858,10 @@ class Trader:
                     return 2
                 await asyncio.sleep(self.settings.loop.interval_seconds)
                 continue
-            first, second = self.journal.append(result.entry)
-            print(first, flush=True)
-            print(second, flush=True)
+            if not result.quiet:
+                first, second = self.journal.append(result.entry)
+                print(first, flush=True)
+                print(second, flush=True)
             if once:
                 return 0
             await asyncio.sleep(self.settings.loop.interval_seconds)
@@ -929,6 +1024,16 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def _refusal(outcome: ReceiptOutcome) -> str:
+    """The rules that stopped it, by name, in the signer's words."""
+    failed = [
+        f"{rule.name}: {rule.detail or rule.outcome}"
+        for rule in outcome.decision.rules
+        if rule.outcome == "fail"
+    ]
+    return _flat("; ".join(failed) or outcome.reason or outcome.outcome)
+
+
 def _lesson(outcome: ReceiptOutcome) -> str:
     """A refusal in the signer's own words, ready to hand back to the model."""
     failed = [
@@ -990,4 +1095,4 @@ def _asked(intent: Intent | None) -> JSONValue:
     }
 
 
-__all__ = ["Cycle", "EscalationQueue", "OutOfBusiness", "Trader", "build", "main"]
+__all__ = ["Cycle", "EscalationQueue", "Trader", "build", "main"]

@@ -242,6 +242,7 @@ def policy(
     per_tx_cap: str = "5",
     human_threshold: str = "20",
     destinations: tuple[str, ...] = (TREASURY, OPERATOR),
+    window: str = "100",
 ) -> PolicyDocument:
     return PolicyDocument(
         version=POLICY_VERSION,
@@ -256,7 +257,7 @@ def policy(
                 allowlist_assets=("XRP", RLUSD),
                 may_swap=True,
                 per_tx_cap=(AssetLimit(asset="XRP", amount=per_tx_cap),),
-                windows=(WindowRule(asset="XRP", amount="100", seconds=3600),),
+                windows=(WindowRule(asset="XRP", amount=window, seconds=3600),),
             ),
         ),
         tiers=Tiers(
@@ -744,43 +745,97 @@ async def test_the_bill_is_proposed_and_settles(tmp_path: Path) -> None:
     assert not rig.model.requests, "the bill is the cycle's one action; the model is not asked"
 
 
-@pytest.mark.asyncio
-async def test_a_refused_bill_puts_the_agent_out_of_business(tmp_path: Path) -> None:
+def _window_capped_rig(tmp_path: Path) -> Rig:
+    """A policy whose window the bill can never fit in: window_cap on every call."""
     clock = Clock()
     rig = build(
         tmp_path,
         ScriptedModel(),
-        document=policy(destinations=(TREASURY, STRANGER)),
+        document=policy(window="0.5"),
         bill_day=_today(clock),
         clock=clock,
     )
     rig.trader.state.bill.accrued_usd = Decimal("0.50")
     rig.trader.state.bill.cycles = 20
+    return rig
 
-    code = await rig.trader.run(once=True)
 
-    assert code == 1
-    journal = rig.journal()
-    assert "Out of business." in journal
-    assert "the compute bill was refused" in journal
-    assert "destination" in journal
+def _proposals(rig: Rig) -> int:
+    return len(rig.trader.builder.state_when_called)
 
 
 @pytest.mark.asyncio
-async def test_a_bill_the_treasury_cannot_cover_puts_the_agent_out_of_business(
+async def test_a_refused_bill_is_journaled_and_never_ends_the_process(tmp_path: Path) -> None:
+    rig = _window_capped_rig(tmp_path)
+
+    code = await rig.trader.run(once=True)
+
+    assert code == 0
+    journal = rig.journal()
+    assert "bill refused: window_cap" in journal
+    assert "retrying on 2026-09-16T10:00:00Z" in journal
+    assert "Out of business" not in journal
+    assert rig.trader.state.bill.accrued_usd > 0, "the bill stays owed"
+
+
+@pytest.mark.asyncio
+async def test_a_window_cap_refusal_is_retried_once_an_hour_not_once_a_cycle(
     tmp_path: Path,
 ) -> None:
+    rig = _window_capped_rig(tmp_path)
+
+    for _ in range(24):  # six hours of 15-minute cycles
+        await rig.trader.cycle()
+        rig.clock.advance(900)
+
+    assert _proposals(rig) == 6, "one refused proposal an hour, not one a cycle"
+    assert len(rig.trader.state.refused) <= 3, "old refusals are forgotten after two hours"
+
+
+@pytest.mark.asyncio
+async def test_a_restart_inside_the_hour_does_not_refile_the_refusal(tmp_path: Path) -> None:
+    rig = _window_capped_rig(tmp_path)
+    await rig.trader.cycle()
+    assert _proposals(rig) == 1
+
+    rig.clock.advance(60)
+    rig.trader.state = books.State.load(rig.trader.settings.loop.state_file)  # the restart
+    await rig.trader.cycle()
+    # Even with the retry gate lost, the same intent is not filed twice in the hour.
+    rig.trader.state.bill_retry_at = ""
+    rig.clock.advance(60)
+    result = await rig.trader.cycle()
+
+    assert _proposals(rig) == 1
+    assert result.quiet
+    assert "not filing it again within the hour" in result.entry.headline
+
+
+@pytest.mark.asyncio
+async def test_a_bill_the_treasury_cannot_cover_idles_and_stays_alive(tmp_path: Path) -> None:
     clock = Clock()
     rig = build(tmp_path, ScriptedModel(), bill_day=_today(clock), clock=clock, xrp="1")
     rig.trader.state.bill.accrued_usd = Decimal("40")
     rig.trader.state.bill.cycles = 500
 
     code = await rig.trader.run(once=True)
-
-    assert code == 1
+    assert code == 0
     assert "Out of business." in rig.journal()
     assert "the treasury holds 1" in rig.journal()
-    assert not rig.ledger.outflows, "nothing is proposed when the money is not there"
+
+    notes = rig.journal().count("Out of business.")
+    for _ in range(7):  # under two hours of 15-minute cycles: one more note at most
+        rig.clock.advance(900)
+        await rig.trader.cycle()
+    quiet_rows = rig.journal().count("Out of business.")
+    assert quiet_rows == notes, "nothing is journaled inside the hour"
+    assert not rig.ledger.outflows and _proposals(rig) == 0
+    assert not rig.model.requests, "an out-of-business agent does not trade either"
+
+    rig.clock.advance(3600)
+    result = await rig.trader.cycle()
+    assert not result.quiet, "said again after an hour"
+    assert _proposals(rig) == 0
 
 
 @pytest.mark.asyncio

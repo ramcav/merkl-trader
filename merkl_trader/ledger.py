@@ -199,9 +199,19 @@ class State:
     pending: Pending | None = None
     in_flight: InFlight | None = None
     bill: Bill = dataclasses.field(default_factory=Bill)
+    bill_retry_at: str = ""
+    """When a refused bill may be proposed again. Empty: not waiting."""
+    refused: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    """Recently refused intents (``destination``, ``amount``, ``at``), so a restart
+    cannot refile the same refusal inside the hour."""
+    broke_noted_at: str = ""
+    """When the agent last said it could not cover the bill. Empty: solvent."""
 
     def to_content(self) -> JSONObject:
         return {
+            "bill_retry_at": self.bill_retry_at,
+            "refused": self.refused,
+            "broke_noted_at": self.broke_noted_at,
             "cycle": self.cycle,
             "lesson": self.lesson,
             "pending": self.pending.to_content() if self.pending else None,
@@ -219,6 +229,9 @@ class State:
                 InFlight.from_content(data["in_flight"]) if data.get("in_flight") else None
             ),
             bill=Bill.from_content(data.get("bill") or {}),
+            bill_retry_at=str(data.get("bill_retry_at", "")),
+            refused=[dict(item) for item in data.get("refused") or []],
+            broke_noted_at=str(data.get("broke_noted_at", "")),
         )
 
     @classmethod
