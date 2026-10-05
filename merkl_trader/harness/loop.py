@@ -37,7 +37,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -65,6 +65,7 @@ from merkl.adapters.xrpl import currency_code
 
 from merkl_trader import config as configuration
 from merkl_trader import ledger as books
+from merkl_trader.harness import sessions
 
 MERKL_MCP_COMMAND: Final = "merkl-mcp"
 """The console script ``merkl-mcp``'s own ``pyproject.toml`` installs."""
@@ -244,7 +245,7 @@ def _situation(now: str, *, wake_minutes: int) -> str:
 
 def mcp_server(
     bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND, trader_home: Path | None = None
-) -> MCPServerStdio:
+) -> sessions.SessionedServer:
     """``merkl-mcp`` over stdio, told where this agent's bundle lives.
 
     ``MERKL_AGENT_DIR`` is merged onto a filtered copy of this process's own
@@ -265,7 +266,7 @@ def mcp_server(
         value = os.environ.get(name, "").strip()
         if value:
             env[name] = value
-    return MCPServerStdio(
+    return sessions.SessionedServer(
         params={"command": command, "env": env},
         name="merkl-mcp",
         client_session_timeout_seconds=30,
@@ -322,6 +323,19 @@ def coingecko_server(url: str = COINGECKO_MCP_URL) -> MCPServerStreamableHttp:
     )
 
 
+def merkl_client(settings: configuration.Config) -> Any | None:
+    """The notary client the cycles' sessions go through; ``None`` when no key is
+    configured (the agent then runs without sessions, as before)."""
+    from merkl.sdk import MerklClient
+
+    try:
+        key = settings.notary.api_key()
+    except configuration.ConfigError as exc:
+        print(f"harness: no sessions, {exc}", file=sys.stderr)
+        return None
+    return MerklClient(endpoint=settings.notary.url, agent_id=settings.agent.agent_id, api_key=key)
+
+
 def market_servers(settings: configuration.Config) -> list[MCPServer]:
     """The read-only servers mounted beside merkl-mcp."""
     servers: list[MCPServer] = [xrpl_server(settings.rail.json_rpc_url)]
@@ -344,6 +358,7 @@ class Harness:
         server: MCPServer,
         extra_servers: Sequence[MCPServer] = (),
         unavailable: Sequence[str] = (),
+        client: Any | None = None,
         model: Any | None = None,
         clock: Clock | None = None,
     ) -> None:
@@ -352,6 +367,7 @@ class Harness:
         self.server = server
         self.extra_servers = tuple(extra_servers)
         self.unavailable = tuple(unavailable)
+        self.client = client
         self._model = model
         self.clock = clock or SystemClock()
         self.cycle_count = 0
@@ -417,7 +433,46 @@ class Harness:
             tool_use_behavior={"stop_at_tool_names": list(PROPOSAL_TOOLS)},
         )
         situation = _situation(now, wake_minutes=max(1, self.settings.loop.interval_seconds // 60))
-        return await Runner.run(agent, situation, max_turns=MAX_TURNS)
+        async with self._cycle_session() as recorder:
+            result = await Runner.run(agent, situation, max_turns=MAX_TURNS, hooks=recorder)
+            if recorder is not None:
+                await _record_outcome(recorder, result)
+            return result
+
+    @contextlib.asynccontextmanager
+    async def _cycle_session(self) -> AsyncIterator[sessions.CycleRecorder | None]:
+        """One sealed Merkl session around the run — sealed on failure too. A
+        notary that cannot open it costs the session, never the cycle."""
+        if self.client is None:
+            yield None
+            return
+        stack = AsyncExitStack()
+        try:
+            names = await self._tool_names()
+            session = await stack.enter_async_context(
+                self.client.session(
+                    goal=sessions.goal_of(self.settings.agent.mandate), allowed_tools=names
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"harness: no session this cycle: {exc}", file=sys.stderr)
+            yield None
+            return
+        recorder = sessions.CycleRecorder(session)
+        if isinstance(self.server, sessions.SessionedServer):
+            self.server.recorder = recorder
+        async with stack:
+            try:
+                yield recorder
+            finally:
+                if isinstance(self.server, sessions.SessionedServer):
+                    self.server.recorder = None
+
+    async def _tool_names(self) -> list[str]:
+        names = ["web_search"]
+        for server in (self.server, *self.extra_servers):
+            names.extend(tool.name for tool in await server.list_tools())
+        return names
 
     # -- step 2: what happened ------------------------------------------------ #
 
@@ -556,6 +611,22 @@ def _pair_output(items: Sequence[RunItem], call_id: str | None) -> Any:
     return None
 
 
+async def _record_outcome(recorder: sessions.CycleRecorder, result: RunResult) -> None:
+    """Hosted web searches (no hook fires for them) and the model's closing words."""
+    for item in result.new_items:
+        raw = getattr(item, "raw_item", None)
+        if isinstance(item, ToolCallItem) and getattr(raw, "type", "") == "web_search_call":
+            action = getattr(raw, "action", None)
+            query = getattr(action, "query", None) if action is not None else None
+            await recorder.record(
+                "web_search", {"query": query}, sessions.clip(getattr(raw, "status", ""))
+            )
+    if _proposal(result) is None:
+        await recorder.record(
+            "agent.final_text", {}, sessions.clip(_flat(str(result.final_output)))
+        )
+
+
 def _error_text(payload: Any) -> str | None:
     """The ``error`` a tool answered with instead of an outcome, if any."""
     data = _as_json(_as_text(payload))
@@ -657,6 +728,7 @@ async def _run(arguments: argparse.Namespace) -> int:
     set_tracing_disabled(True)  # a receipt is this agent's public record; a trace is not it
 
     server = mcp_server(_bundle_dir(arguments.config), trader_home=settings.loop.home)
+    client = merkl_client(settings)
     extra = market_servers(settings)
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(server)
@@ -678,6 +750,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             server=server,
             extra_servers=connected,
             unavailable=unavailable,
+            client=client,
         )
         return await harness.run(once=bool(arguments.once))
 

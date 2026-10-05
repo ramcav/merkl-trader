@@ -9,6 +9,9 @@ Releases are cut by pushing a `v<version>` tag; see
 
 ## [Unreleased]
 
+- **Each harness cycle is a sealed Merkl session** with every tool call recorded as an action
+  and the receipt joined through `merkl-mcp`'s new `session_id` argument (`harness/sessions.py`).
+
 - The harness prompt explains that XRP amounts in book offers are drops (with the
   price arithmetic) and points the bill paragraph at `get_treasury`'s `compute_bill`.
   The harness now writes `cost_usd` per cycle and passes `MERKL_TRADER_HOME` to merkl-mcp,

@@ -258,6 +258,16 @@ server, reference prices from CoinGecko, news from web search, and money only
 through Merkl. A market server that is down at start-up is dropped, not fatal, and every
 journal line then begins "ledger server unavailable: <reason>".
 
+**Every cycle is a sealed Merkl session.** The harness opens
+`MerklClient(...).session(goal=<the mandate's first sentence>, allowed_tools=<every tool it
+mounts>)` around the run, records each tool call as an action (name, input, output cut
+to 4 KB; the hosted web search and the model's final text too) through the Agents SDK's
+run hooks, and seals the session at the end of the cycle, on failure as well. The
+`propose_*` calls get the session id from the harness on the wire (the model never sees
+or supplies it), so the receipt joins the session and the agent shows up on the
+dashboard's Overview. A notary that cannot open a session costs the session, never the
+cycle; with no notary key configured the harness runs without sessions.
+
 This process is thin by design: unlike `trader.py`, it keeps no local
 `State`, no nonce, no in-flight bookkeeping, and no compute-bill accrual — the
 treasury, the receipts and the crash-safety already live behind `merkl-mcp`'s

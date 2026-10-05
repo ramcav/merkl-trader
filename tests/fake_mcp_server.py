@@ -100,8 +100,11 @@ def propose_payment(
     currency: str,
     why: str,
     issuer: str | None = None,
+    session_id: str | None = None,
+    session_action_count: int | None = None,
+    depends_on: str | None = None,
 ) -> dict[str, Any]:
-    return _propose()
+    return _propose(session_id, session_action_count, depends_on)
 
 
 @server.tool()
@@ -113,8 +116,11 @@ def propose_swap(
     why: str,
     sell_issuer: str | None = None,
     buy_issuer: str | None = None,
+    session_id: str | None = None,
+    session_action_count: int | None = None,
+    depends_on: str | None = None,
 ) -> dict[str, Any]:
-    return _propose()
+    return _propose(session_id, session_action_count, depends_on)
 
 
 @server.tool()
@@ -131,11 +137,19 @@ def pending_approval() -> dict[str, Any]:
     return answer
 
 
-def _propose() -> dict[str, Any]:
+def _propose(
+    session_id: str | None = None,
+    session_action_count: int | None = None,
+    depends_on: str | None = None,
+) -> dict[str, Any]:
     global _HELD
     if _HELD is not None:
         return dict(_HELD)
     answer = dict(_SCRIPT.get("propose") or _DEFAULT_PROPOSE)
+    if session_id:
+        answer["joined_session"] = session_id
+        answer["session_action_count"] = session_action_count
+        answer["depends_on"] = depends_on
     if answer.get("outcome") == "waiting_for_a_person":
         _HELD = answer
     return answer

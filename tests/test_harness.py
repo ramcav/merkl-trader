@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from agents.mcp import MCPServerStdio
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 
 from merkl_trader import config as configuration
 from merkl_trader import ledger as books
+from merkl_trader.harness import sessions
 from merkl_trader.harness.loop import Harness
 
 FAKE_SERVER = Path(__file__).parent / "fake_mcp_server.py"
@@ -74,10 +74,10 @@ def settings_for(home: Path) -> configuration.Config:
     return configuration.parse({**RAW, "loop": {"interval_seconds": 900, "home": str(home)}})
 
 
-def fake_server(home: Path, script: dict[str, Any]) -> MCPServerStdio:
+def fake_server(home: Path, script: dict[str, Any]) -> sessions.SessionedServer:
     script_path = home / "fake-mcp-script.json"
     script_path.write_text(json.dumps(script))
-    return MCPServerStdio(
+    return sessions.SessionedServer(
         params={
             "command": sys.executable,
             "args": [str(FAKE_SERVER)],
