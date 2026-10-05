@@ -9,6 +9,11 @@ Releases are cut by pushing a `v<version>` tag; see
 
 ## [Unreleased]
 
+- The harness prompt explains that XRP amounts in book offers are drops (with the
+  price arithmetic) and points the bill paragraph at `get_treasury`'s `compute_bill`.
+  The harness now writes `cost_usd` per cycle and passes `MERKL_TRADER_HOME` to merkl-mcp,
+  which computes the bill from that journal.
+
 ## [0.2.0] - 2026-09-16
 
 ### Added

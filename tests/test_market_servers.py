@@ -226,3 +226,36 @@ async def test_coingecko_shutdown_never_raises_and_the_404_warning_is_silent(
     with caplog.at_level(logging.WARNING, logger="mcp.client.streamable_http"):
         logging.getLogger("mcp.client.streamable_http").warning("Session termination failed: 404")
     assert "Session termination failed" not in caplog.text
+
+
+def test_the_prompt_says_xrp_amounts_are_drops_and_shows_the_price_arithmetic() -> None:
+    from merkl_trader import config as configuration
+
+    market = configuration.MarketConfig(
+        base="XRP",
+        quote_code="RLUSD",
+        quote_issuer="rISSUER",
+        depths=(),
+        reference_url="https://x.invalid",
+        reference_path=("a",),
+        reference_source="s",
+    )
+
+    prompt = loop.system_prompt("m", operator="rOP", bill_day="monday", market=market)
+
+    assert "1 XRP = 1,000,000 drops" in prompt
+    assert "1.06 / 2000000 * 1000000 = 0.53 RLUSD per XRP" in prompt
+    assert "Never read a drops figure as XRP" in prompt
+
+
+def test_the_bill_paragraph_points_at_the_compute_bill_field() -> None:
+    prompt = loop.system_prompt("m", operator="rOP", bill_day="monday")
+
+    assert "compute_bill" in prompt
+    assert "owed is null" in prompt and "hold it until it can be priced" in prompt
+
+
+def test_the_merkl_mcp_subprocess_is_told_where_the_journal_lives(tmp_path: Path) -> None:
+    server = loop.mcp_server(tmp_path / "agent", trader_home=tmp_path / "home")
+
+    assert server.params.env["MERKL_TRADER_HOME"] == str(tmp_path / "home")
