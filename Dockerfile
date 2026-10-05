@@ -43,6 +43,7 @@ USER merkl-trader
 # PYTHONUNBUFFERED so the two journal lines each cycle reach `docker logs`
 # when they are printed rather than when the process ends.
 ENV MERKL_TRADER_HOME=/var/lib/merkl-trader \
+    MERKL_MCP_STATE=/var/lib/merkl-trader/mcp \
     XRPL_MCP_PYTHON=/opt/xrpl/bin/python \
     PYTHONUNBUFFERED=1
 

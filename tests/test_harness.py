@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -337,3 +338,26 @@ async def test_a_proposal_that_errors_is_a_journaled_hold(tmp_path: Path) -> Non
 
     assert entry.action == "hold"
     assert entry.headline.startswith("could not propose: Invalid value to construct")
+
+
+@pytest.mark.asyncio
+async def test_each_cycle_journals_its_compute_cost(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelStep(output=[assistant_message("holding")])])
+    entry, _ = await one_cycle(tmp_path, script={}, model=model)
+
+    expected = (entry.tokens_in * Decimal("2.00") + entry.tokens_out * Decimal("10.00")) / Decimal(
+        1_000_000
+    )
+    assert entry.cost_usd == expected
+
+
+def test_merkl_mcp_subprocess_is_told_where_state_and_receipts_live(monkeypatch, tmp_path):
+    from merkl_trader.harness import loop as harness_loop
+
+    monkeypatch.setenv("MERKL_MCP_STATE", "/var/lib/merkl-trader/mcp")
+    monkeypatch.setenv("MERKL_RECEIPT_DIR", "/var/lib/merkl-trader/receipts")
+    server = harness_loop.mcp_server(tmp_path, trader_home=tmp_path)
+    env = server.params.env
+    assert env["MERKL_MCP_STATE"] == "/var/lib/merkl-trader/mcp"
+    assert env["MERKL_RECEIPT_DIR"] == "/var/lib/merkl-trader/receipts"
+    assert env["MERKL_AGENT_DIR"] == str(tmp_path)

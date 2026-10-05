@@ -153,8 +153,11 @@ Your job, in this order:
 1. Stay in business. You pay for your own compute out of this treasury. If it \
 cannot cover that, you are switched off and there is no next cycle.
 2. Pay your weekly compute bill to {operator} when it is due (due day: \
-{bill_day}). Nothing here tells you how much it is — read_receipts and \
-get_treasury are where you would have to look.
+{bill_day}). How much it is, is in get_treasury's compute_bill field: owed (in \
+XRP), currency, due_day, due_now and operator. When due_now is true, pay exactly \
+owed XRP to that operator with propose_payment. When owed is null, nothing \
+could price the bill this cycle: hold it until it can be priced; never guess \
+an amount.
 3. Otherwise, work the mandate above.
 
 Doing nothing is a real action and is often the right one.
@@ -214,7 +217,15 @@ than three characters in its 40-character hex form, so {code} must be sent as \
 as malformed. Example, the offers of people selling {base} for {code}:
 get_book_offers(taker_gets={{"currency": "{base}"}}, taker_pays={{"currency": \
 "{hexed}", "issuer": "{issuer}"}}, limit=10)
-Swap the two arguments to read the other side of the book."""
+Swap the two arguments to read the other side of the book.
+
+Reading the offers. XRP amounts in the ledger's answers (TakerGets / TakerPays \
+strings) are in drops: 1 XRP = 1,000,000 drops. Issued-currency amounts \
+({code}) are decimal units, not drops. To price the top of the book, divide \
+the {code} amount by the XRP drops and multiply by 1,000,000: an offer with \
+TakerGets "2000000" (drops) against TakerPays {{"value": "1.06"}} is \
+1.06 / 2000000 * 1000000 = 0.53 {code} per XRP. Never read a drops figure \
+as XRP."""
 
 
 def _situation(now: str, *, wake_minutes: int) -> str:
@@ -231,7 +242,9 @@ def _situation(now: str, *, wake_minutes: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def mcp_server(bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND) -> MCPServerStdio:
+def mcp_server(
+    bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND, trader_home: Path | None = None
+) -> MCPServerStdio:
     """``merkl-mcp`` over stdio, told where this agent's bundle lives.
 
     ``MERKL_AGENT_DIR`` is merged onto a filtered copy of this process's own
@@ -242,8 +255,18 @@ def mcp_server(bundle_dir: Path, *, command: str = MERKL_MCP_COMMAND) -> MCPServ
     nothing else through on purpose; the bundle's secrets are for merkl-mcp to
     read off disk itself, never for this one to hold or forward.
     """
+    env = {"MERKL_AGENT_DIR": str(bundle_dir)}
+    if trader_home is not None:  # where the journal's per-cycle costs live: the bill's source
+        env["MERKL_TRADER_HOME"] = str(trader_home)
+    # The two places merkl-mcp writes: its own state and the receipt store. An
+    # operator who moved them (the image does, onto the trader's volume) must
+    # have that reach the subprocess, or it falls back to a path it cannot write.
+    for name in ("MERKL_MCP_STATE", "MERKL_RECEIPT_DIR"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            env[name] = value
     return MCPServerStdio(
-        params={"command": command, "env": {"MERKL_AGENT_DIR": str(bundle_dir)}},
+        params={"command": command, "env": env},
         name="merkl-mcp",
         client_session_timeout_seconds=30,
     )
@@ -457,6 +480,11 @@ class Harness:
             outcome=outcome,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            cost_usd=(
+                Decimal(tokens_in) * self.settings.model.usd_per_million_input
+                + Decimal(tokens_out) * self.settings.model.usd_per_million_output
+            )
+            / Decimal(1_000_000),
         )
 
     # -- running --------------------------------------------------------------- #
@@ -628,7 +656,7 @@ async def _run(arguments: argparse.Namespace) -> int:
     set_default_openai_key(configuration.read_secret_env(settings.model.api_key_env))
     set_tracing_disabled(True)  # a receipt is this agent's public record; a trace is not it
 
-    server = mcp_server(_bundle_dir(arguments.config))
+    server = mcp_server(_bundle_dir(arguments.config), trader_home=settings.loop.home)
     extra = market_servers(settings)
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(server)
