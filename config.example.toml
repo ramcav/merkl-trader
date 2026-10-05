@@ -118,4 +118,5 @@ coingecko = true
 # converted at the price it can see. If that payment is refused, or the treasury
 # cannot cover it, the agent writes "out of business" and exits non-zero.
 bill_day = "monday"
+# Must be a valid classic address (r...); the config refuses this placeholder.
 operator = "rOPERATORADDRESSGOESHERE00000000000"

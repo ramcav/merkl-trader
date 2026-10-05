@@ -48,7 +48,7 @@ RAW: dict[str, object] = {
         "usd_per_million_output": "10.00",
     },
     "loop": {"interval_seconds": 900, "home": "~/.merkl/trader"},
-    "bill": {"bill_day": "monday", "operator": "rOPERATOR"},
+    "bill": {"bill_day": "monday", "operator": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"},
 }
 
 
@@ -264,3 +264,11 @@ def test_read_bundle_bytes_is_the_same_hint_for_the_key_file(tmp_path: Path) -> 
             configuration.read_bundle_bytes(key)
     finally:
         key.chmod(0o600)
+
+
+@pytest.mark.parametrize("operator", ["rOPERATORADDRESSGOESHERE00000000000", "", "not-an-address"])
+def test_a_placeholder_or_malformed_operator_is_refused_at_load(operator: str) -> None:
+    raw = {**RAW, "bill": {"bill_day": "monday", "operator": operator}}
+
+    with pytest.raises(configuration.ConfigError, match="bill.operator"):
+        configuration.parse(raw)

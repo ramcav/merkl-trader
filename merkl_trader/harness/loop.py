@@ -414,6 +414,17 @@ class Harness:
                 tokens_out=usage.output_tokens,
             )
         name, payload = proposal
+        failure = _error_text(payload)
+        if failure is not None:
+            return self._entry(
+                now,
+                headline=f"could not propose: {failure[:NOTE_LENGTH]}",
+                action="hold",
+                outcome="none",
+                balances=balances,
+                tokens_in=usage.input_tokens,
+                tokens_out=usage.output_tokens,
+            )
         return self._entry(
             now,
             headline=f"{name}: {_flat(_as_text(payload))[:NOTE_LENGTH]}",
@@ -514,6 +525,16 @@ def _pair_output(items: Sequence[RunItem], call_id: str | None) -> Any:
     for item in items:
         if isinstance(item, ToolCallOutputItem) and item.call_id == call_id:
             return _as_json(_as_text(item.output))
+    return None
+
+
+def _error_text(payload: Any) -> str | None:
+    """The ``error`` a tool answered with instead of an outcome, if any."""
+    data = _as_json(_as_text(payload))
+    if not isinstance(data, dict) and isinstance(payload, dict):
+        data = payload
+    if isinstance(data, dict) and data.get("error") and not data.get("outcome"):
+        return _flat(str(data["error"]))
     return None
 
 

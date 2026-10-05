@@ -65,7 +65,7 @@ RAW: dict[str, Any] = {
         "usd_per_million_output": "10.00",
     },
     "loop": {"interval_seconds": 900, "home": "~/.merkl/trader"},
-    "bill": {"bill_day": "monday", "operator": "rOPERATORexampleaccount000000000"},
+    "bill": {"bill_day": "monday", "operator": "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"},
 }
 
 
@@ -306,12 +306,34 @@ def test_the_system_prompt_states_the_mandate_and_no_policy_number() -> None:
 
     prompt = system_prompt(
         "Trade the treasury's XRP against RLUSD. Prefer doing nothing to a thin book.",
-        operator="rOPERATORexampleaccount000000000",
+        operator="rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh",
         bill_day="monday",
     )
     assert "Trade the treasury's XRP against RLUSD" in prompt
-    assert "rOPERATORexampleaccount000000000" in prompt
+    assert "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh" in prompt
     assert "you do not control" in prompt
     assert "information, not a failure" in prompt
     for forbidden in ("per_tx_cap", "5 XRP", "threshold of", "window of"):
         assert forbidden not in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_proposal_that_errors_is_a_journaled_hold(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            ModelStep(
+                output=[
+                    function_call(
+                        "propose_payment",
+                        {"destination": "x", "amount": "1", "currency": "XRP", "why": "bill"},
+                        call_id="c1",
+                    )
+                ]
+            )
+        ]
+    )
+    script = {"propose": {"error": "Invalid value to construct an AccountID"}}
+    entry, _ = await one_cycle(tmp_path, script=script, model=model)
+
+    assert entry.action == "hold"
+    assert entry.headline.startswith("could not propose: Invalid value to construct")

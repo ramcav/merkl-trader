@@ -67,6 +67,14 @@ NONCE_LENGTH: Final = 32
 RECEIPTS_SHOWN: Final = 20
 
 
+class ProposalFailed(Exception):
+    """A proposal raised before it produced a receipt; the message is the reason."""
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
 class OutOfBusiness(Exception):
     """The agent cannot pay for itself. There is no recovering from this in code."""
 
@@ -214,6 +222,10 @@ class Trader:
         if in_flight is None:
             return
         found = await self.store.get(in_flight.receipt_id)
+        if found is None and in_flight.kind == "bill":
+            # Nothing was proposed, so nothing is spent. The bill keeps its one id
+            # (see _pay_the_bill) until a receipt exists; the cycle retries it.
+            return
         if found is None:
             self.journal.note(
                 now,
@@ -282,14 +294,25 @@ class Trader:
         )
         self.state.pending = None
         self._save()
-        outcome = await self.builder.resume(
-            instruction=Instruction.from_content(pending.instruction),
-            intent=Intent.from_content(pending.intent),
-            decision=decision,
-            receipt_id=receipt_id,
-            reasoning=(Reasoning.from_content(pending.reasoning) if pending.reasoning else None),
-            prepared_tx=pending.prepared_tx,
-        )
+        try:
+            outcome = await self.builder.resume(
+                instruction=Instruction.from_content(pending.instruction),
+                intent=Intent.from_content(pending.intent),
+                decision=decision,
+                receipt_id=receipt_id,
+                reasoning=(
+                    Reasoning.from_content(pending.reasoning) if pending.reasoning else None
+                ),
+                prepared_tx=pending.prepared_tx,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed resume is a note, never an exit
+            self.state.in_flight = None
+            self.state.pending = pending
+            self._save()
+            self.journal.note(
+                now, f"could not resume escalation {pending.challenge[:12]}…: {_flat(str(exc))}"
+            )
+            return
         self.state.in_flight = None
         self.state.lesson = "" if outcome.settled else _lesson(outcome)
         self.journal.note(
@@ -343,24 +366,37 @@ class Trader:
                 outcome="none",
             )
 
+        bill_receipt_id = self._receipt_id(f"bill-{self.state.bill.last_paid}")
         intent = self._payment_intent(
             now,
             destination=self.settings.bill.operator,
             amount=Amount(value=format_decimal(amount), currency=snapshot.base),
-            receipt_id=self._receipt_id("bill"),
+            receipt_id=bill_receipt_id,
         )
-        outcome = await self._execute(
-            now,
-            intent=intent,
-            kind="bill",
-            reasoning=(
-                f"Weekly compute bill: {self.state.bill.tokens_in} input and "
-                f"{self.state.bill.tokens_out} output tokens over {self.state.bill.cycles} "
-                f"cycles, ${format_decimal(owed)} at {format_decimal(price)} "
-                f"{snapshot.quote} per {snapshot.base}."
-            ),
-            source="mandate",
+        reasoning = (
+            f"Weekly compute bill: {self.state.bill.tokens_in} input and "
+            f"{self.state.bill.tokens_out} output tokens over {self.state.bill.cycles} "
+            f"cycles, ${format_decimal(owed)} at {format_decimal(price)} "
+            f"{snapshot.quote} per {snapshot.base}."
         )
+        try:
+            outcome = await self._execute(
+                now,
+                intent=intent,
+                kind="bill",
+                reasoning=reasoning,
+                source="mandate",
+                receipt_id=bill_receipt_id,
+            )
+        except ProposalFailed as exc:
+            return self._entry(
+                now,
+                snapshot,
+                runway,
+                headline=f"could not propose the compute bill: {exc}. It is still owed.",
+                action="bill",
+                outcome="none",
+            )
         if outcome.settled:
             self.state.bill.settled(_moment(now).date().isoformat())
             self._save()
@@ -449,9 +485,16 @@ class Trader:
             self._save()
             return entry(f"Refused to build the proposal: {exc}", "malformed")
 
-        outcome = await self._execute(
-            now, intent=intent, kind=decision.kind, reasoning=decision.reasoning, source="mandate"
-        )
+        try:
+            outcome = await self._execute(
+                now,
+                intent=intent,
+                kind=decision.kind,
+                reasoning=decision.reasoning,
+                source="mandate",
+            )
+        except ProposalFailed as exc:
+            return entry(f"could not propose: {exc}", "none")
         if outcome.settled:
             return entry(
                 f"{_described(decision)} Settled.", "settled", outcome.envelope.receipt_id
@@ -471,25 +514,43 @@ class Trader:
     # -- acting ------------------------------------------------------------- #
 
     async def _execute(
-        self, now: str, *, intent: Intent, kind: str, reasoning: str, source: str
+        self,
+        now: str,
+        *,
+        intent: Intent,
+        kind: str,
+        reasoning: str,
+        source: str,
+        receipt_id: str | None = None,
     ) -> ReceiptOutcome:
-        """Propose, remembering the nonce first so a crash cannot double-propose."""
-        receipt_id = self._receipt_id(f"{kind}-{self.state.cycle}")
+        """Propose, remembering the nonce first so a crash cannot double-propose.
+
+        Any exception from the proposal becomes :class:`ProposalFailed`: the
+        caller journals a hold with the reason and the loop goes on. A bill
+        stays in flight (one id) until a receipt exists; anything else is
+        cleared, since nothing was sent."""
+        receipt_id = receipt_id or self._receipt_id(f"{kind}-{self.state.cycle}")
         self.state.in_flight = books.InFlight(
             receipt_id=receipt_id, nonce=intent.nonce, kind=kind, at=now
         )
         self._save()
 
-        outcome = await self.builder.execute(
-            instruction=Instruction(
-                source=source,
-                content_hash=SHA256Hash.from_bytes(self.settings.agent.mandate.encode()).hex(),
-                ref=f"cycle-{self.state.cycle}",
-            ),
-            intent=intent,
-            reasoning=_reasoning(reasoning),
-            receipt_id=receipt_id,
-        )
+        try:
+            outcome = await self.builder.execute(
+                instruction=Instruction(
+                    source=source,
+                    content_hash=SHA256Hash.from_bytes(self.settings.agent.mandate.encode()).hex(),
+                    ref=f"cycle-{self.state.cycle}",
+                ),
+                intent=intent,
+                reasoning=_reasoning(reasoning),
+                receipt_id=receipt_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed proposal is a hold, never an exit
+            if kind != "bill":
+                self.state.in_flight = None
+            self._save()
+            raise ProposalFailed(_flat(str(exc) or type(exc).__name__)) from exc
         self.state.in_flight = None
         self.state.lesson = "" if outcome.settled else _lesson(outcome)
         if outcome.pending_escalation is not None:
@@ -691,6 +752,14 @@ class Trader:
                 return 1
             except markets.MarketError as exc:
                 print(f"could not read the market: {exc}", file=sys.stderr, flush=True)
+                if once:
+                    return 2
+                await asyncio.sleep(self.settings.loop.interval_seconds)
+                continue
+            except Exception as exc:  # noqa: BLE001 - nothing a cycle raises may end the agent
+                reason = _flat(str(exc) or type(exc).__name__)
+                self.journal.note(self.clock.now(), f"cycle failed, holding: {reason}")
+                print(f"cycle failed: {reason}", file=sys.stderr, flush=True)
                 if once:
                     return 2
                 await asyncio.sleep(self.settings.loop.interval_seconds)

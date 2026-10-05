@@ -23,6 +23,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from xrpl.core.addresscodec import is_valid_classic_address
+
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 TRADER_HOME_ENV = "MERKL_TRADER_HOME"
@@ -266,9 +268,19 @@ def parse(raw: dict[str, Any], *, base_dir: Path | None = None) -> Config:
             interval_seconds=_int(loop, "interval_seconds", "loop"),
             home=_loop_home(loop, base_dir),
         ),
-        bill=BillConfig(bill_day=day, operator=_string(bill, "operator", "bill")),
+        bill=BillConfig(bill_day=day, operator=_operator(bill)),
         harness=_harness(raw.get("harness", {})),
     )
+
+
+def _operator(bill: dict[str, Any]) -> str:
+    operator = _string(bill, "operator", "bill")
+    if not is_valid_classic_address(operator):
+        raise ConfigError(
+            f"bill.operator {operator!r} is not a valid classic XRPL address "
+            "(replace the placeholder with the operator's r... address)"
+        )
+    return operator
 
 
 def _harness(table: Any) -> HarnessConfig:

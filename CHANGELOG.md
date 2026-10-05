@@ -40,6 +40,15 @@ Releases are cut by pushing a `v<version>` tag; see
 
 ### Fixed
 
+- **A placeholder `[bill].operator` is refused at load.** `config.load()` now
+  checks it is a valid classic XRPL address and names the field, instead of
+  failing when the bill comes due.
+- **A proposal that raises is a journaled hold, never an exit.** Both loops
+  write "could not propose: <reason>" and carry on; `trader.py`'s `run()` also
+  survives any other cycle exception. The compute bill keeps one receipt id
+  (derived from the last-paid date) and stays in flight until a receipt exists,
+  so a restart no longer mints a new id or writes a new "restarted" note.
+
 - **An unreadable bundle file now names the fix.** The image runs as uid
   10002 and every secret `merkl treasury init` writes is 0600, so a
   bind-mounted bundle owned by a different uid was the single most common

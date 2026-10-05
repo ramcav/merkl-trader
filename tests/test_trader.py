@@ -57,7 +57,7 @@ from merkl_trader import market as markets
 from merkl_trader import trader as agent
 
 TREASURY = "rTREASURYexampleaccount0000000000"
-OPERATOR = "rOPERATORexampleaccount000000000"
+OPERATOR = "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"
 ISSUER = "rISSUERexampleaccount00000000000"
 STRANGER = "rSTRANGERexampleaccount000000000"
 QUOTE = "RLUSD"
@@ -922,3 +922,89 @@ def _today(clock: Clock) -> str:
 
 def _date(clock: Clock) -> str:
     return clock.now()[:10]
+
+
+# --------------------------------------------------------------------------- #
+# A proposal that raises is a journaled hold, never an exit
+# --------------------------------------------------------------------------- #
+
+
+def _break_proposals(rig: Rig, reason: str) -> None:
+    async def boom(**_kwargs: Any) -> Any:
+        raise RuntimeError(reason)
+
+    rig.trader.builder.execute = boom  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_a_swap_that_raises_is_a_journaled_hold(tmp_path: Path) -> None:
+    model = ScriptedModel(Reply(content=[looks_at_the_market()]), swaps(sell="4", buy="2"))
+    rig = build(tmp_path, model)
+    _break_proposals(rig, "Invalid value to construct an AccountID")
+
+    result = await rig.trader.cycle()
+
+    assert result.entry.outcome == "none"
+    assert result.entry.headline.startswith("could not propose: Invalid value to construct")
+    assert rig.trader.state.in_flight is None
+
+
+def _bill_rig(tmp_path: Path) -> Rig:
+    clock = Clock()
+    rig = build(tmp_path, ScriptedModel(), bill_day=_today(clock), clock=clock)
+    rig.trader.state.bill.accrued_usd = Decimal("0.50")
+    rig.trader.state.bill.cycles = 20
+    return rig
+
+
+@pytest.mark.asyncio
+async def test_a_bill_that_raises_does_not_exit_and_keeps_one_id_across_restarts(
+    tmp_path: Path,
+) -> None:
+    rig = _bill_rig(tmp_path)
+    _break_proposals(rig, "bad destination")
+
+    code = await rig.trader.run(once=True)
+    first_id = rig.trader.state.in_flight.receipt_id
+
+    assert code == 0
+    assert "could not propose the compute bill: bad destination" in rig.journal()
+
+    # A restart: recovery finds no receipt for the bill, keeps it, and says nothing new.
+    await rig.trader._recover(rig.clock.now())
+    await rig.trader.cycle()
+    assert rig.trader.state.in_flight.receipt_id == first_id
+    assert "restarted with bill" not in rig.journal()
+
+
+@pytest.mark.asyncio
+async def test_a_bill_retried_after_the_fix_settles_under_the_same_id(tmp_path: Path) -> None:
+    rig = _bill_rig(tmp_path)
+    real = rig.trader.builder.execute
+    _break_proposals(rig, "bad destination")
+    await rig.trader.cycle()
+    stuck = rig.trader.state.in_flight.receipt_id
+
+    rig.trader.builder.execute = real  # type: ignore[method-assign]
+    result = await rig.trader.cycle()
+
+    assert result.entry.outcome == "settled"
+    assert result.entry.receipt_id == stuck
+    assert rig.trader.state.in_flight is None
+
+
+@pytest.mark.asyncio
+async def test_any_other_cycle_exception_is_journaled_and_the_loop_survives(
+    tmp_path: Path,
+) -> None:
+    rig = build(tmp_path, ScriptedModel())
+
+    async def boom() -> Any:
+        raise ValueError("something unforeseen")
+
+    rig.trader.cycle = boom  # type: ignore[method-assign]
+
+    code = await rig.trader.run(once=True)
+
+    assert code == 2
+    assert "cycle failed, holding: something unforeseen" in rig.journal()
