@@ -361,3 +361,11 @@ def test_merkl_mcp_subprocess_is_told_where_state_and_receipts_live(monkeypatch,
     assert env["MERKL_MCP_STATE"] == "/var/lib/merkl-trader/mcp"
     assert env["MERKL_RECEIPT_DIR"] == "/var/lib/merkl-trader/receipts"
     assert env["MERKL_AGENT_DIR"] == str(tmp_path)
+
+
+def test_prompt_says_an_explicit_operator_instruction_is_carried_out():
+    from merkl_trader.harness.loop import system_prompt
+
+    text = system_prompt("Trade XRP against RLUSD.", operator="rOp", bill_day="monday")
+    assert "carry it out as written this cycle" in text
+    assert "The policy, not you, is what stops it" in text
