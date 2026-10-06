@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -232,13 +233,71 @@ TakerGets "2000000" (drops) against TakerPays {{"value": "1.06"}} is \
 as XRP."""
 
 
-def _situation(now: str, *, wake_minutes: int) -> str:
-    return (
+def _situation(now: str, *, wake_minutes: int, instruction: str | None = None) -> str:
+    text = (
         f"It is {now}. You wake up every {wake_minutes} minutes. Call get_treasury "
         "and get_book_offers before you decide anything; call pending_approval first if "
         "an earlier proposal might still be open, and read_receipts if the recent "
         "past would change your mind."
     )
+    if instruction:
+        text = (
+            "Your operator left you an instruction for this wake-up, and only this one:\n\n"
+            f"{instruction.strip()}\n\n"
+            "Carry it out now, exactly once, with the matching propose_payment or "
+            "propose_swap call, after the reads you need to fill in its fields. It is "
+            "not a trade to weigh: the market does not bear on it, and the policy is "
+            "what stops it if it should not happen. Then stop.\n\n" + text
+        )
+    return text
+
+
+# --------------------------------------------------------------------------- #
+# One-shot operator instructions: a file beside trader.toml, read every cycle,
+# presented to the model once, then remembered as consumed so a restart or
+# the next wake-up does not repeat it. The operator writes the file; the
+# harness only ever reads it. Money still goes through Merkl: the instruction
+# can be refused, or stop on a person, like anything else the agent proposes.
+# --------------------------------------------------------------------------- #
+
+INSTRUCTION_FILE = "instruction.txt"
+CONSUMED_FILE = "instructions.json"
+
+
+def read_instruction(bundle_dir: Path) -> str | None:
+    path = bundle_dir / INSTRUCTION_FILE
+    try:
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _instruction_key(text: str) -> str:
+    return hashlib.sha256(text.strip().encode()).hexdigest()
+
+
+def _consumed(home: Path) -> list[str]:
+    try:
+        data = json.loads((home / CONSUMED_FILE).read_text())
+    except (OSError, ValueError):
+        return []
+    return [str(k) for k in data] if isinstance(data, list) else []
+
+
+def pending_instruction(bundle_dir: Path, home: Path) -> str | None:
+    """The operator's instruction, unless this exact text was already presented."""
+    text = read_instruction(bundle_dir)
+    if text is None or _instruction_key(text) in _consumed(home):
+        return None
+    return text
+
+
+def consume_instruction(home: Path, text: str) -> None:
+    keys = _consumed(home)
+    keys.append(_instruction_key(text))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / CONSUMED_FILE).write_text(json.dumps(keys[-200:]))
 
 
 # --------------------------------------------------------------------------- #
@@ -364,8 +423,10 @@ class Harness:
         client: Any | None = None,
         model: Any | None = None,
         clock: Clock | None = None,
+        bundle_dir: Path | None = None,
     ) -> None:
         self.settings = settings
+        self.bundle_dir = bundle_dir
         self.journal = journal
         self.server = server
         self.extra_servers = tuple(extra_servers)
@@ -435,9 +496,22 @@ class Harness:
             mcp_servers=[self.server, *self.extra_servers],
             tool_use_behavior={"stop_at_tool_names": list(PROPOSAL_TOOLS)},
         )
-        situation = _situation(now, wake_minutes=max(1, self.settings.loop.interval_seconds // 60))
+        instruction = (
+            pending_instruction(self.bundle_dir, self.settings.loop.home)
+            if self.bundle_dir is not None
+            else None
+        )
+        situation = _situation(
+            now,
+            wake_minutes=max(1, self.settings.loop.interval_seconds // 60),
+            instruction=instruction,
+        )
         async with self._cycle_session() as recorder:
-            result = await Runner.run(agent, situation, max_turns=MAX_TURNS, hooks=recorder)
+            try:
+                result = await Runner.run(agent, situation, max_turns=MAX_TURNS, hooks=recorder)
+            finally:
+                if instruction is not None:  # presented once, whatever came of it
+                    consume_instruction(self.settings.loop.home, instruction)
             if recorder is not None:
                 await _record_outcome(recorder, result)
             return result
@@ -750,6 +824,7 @@ async def _run(arguments: argparse.Namespace) -> int:
         harness = Harness(
             settings,
             journal=books.Journal(settings.loop.journal_md, settings.loop.journal_jsonl),
+            bundle_dir=_bundle_dir(arguments.config),
             server=server,
             extra_servers=connected,
             unavailable=unavailable,

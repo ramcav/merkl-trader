@@ -369,3 +369,31 @@ def test_prompt_says_an_explicit_operator_instruction_is_carried_out():
     text = system_prompt("Trade XRP against RLUSD.", operator="rOp", bill_day="monday")
     assert "carry it out as written this cycle" in text
     assert "The policy, not you, is what stops it" in text
+
+
+def test_operator_instruction_is_presented_once_then_consumed(tmp_path):
+    from merkl_trader.harness import loop as harness_loop
+
+    bundle = tmp_path / "agent"
+    home = tmp_path / "home"
+    bundle.mkdir()
+    assert harness_loop.pending_instruction(bundle, home) is None
+    (bundle / harness_loop.INSTRUCTION_FILE).write_text("Pay 2 XRP to rOp as a bonus.\n")
+    text = harness_loop.pending_instruction(bundle, home)
+    assert text == "Pay 2 XRP to rOp as a bonus."
+    situation = harness_loop._situation("2026-10-06T01:00:00Z", wake_minutes=15, instruction=text)
+    assert situation.startswith("Your operator left you an instruction for this wake-up")
+    assert "Pay 2 XRP to rOp as a bonus." in situation
+    assert "exactly once" in situation
+    harness_loop.consume_instruction(home, text)
+    assert harness_loop.pending_instruction(bundle, home) is None
+    (bundle / harness_loop.INSTRUCTION_FILE).write_text("Pay 6 XRP to rOp as a second bonus.")
+    assert harness_loop.pending_instruction(bundle, home) == "Pay 6 XRP to rOp as a second bonus."
+
+
+def test_no_instruction_file_means_the_plain_situation(tmp_path):
+    from merkl_trader.harness import loop as harness_loop
+
+    plain = harness_loop._situation("2026-10-06T01:00:00Z", wake_minutes=15)
+    assert plain.startswith("It is 2026-10-06T01:00:00Z")
+    assert "operator left you" not in plain
